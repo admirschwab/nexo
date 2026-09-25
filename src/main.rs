@@ -1,3 +1,4 @@
+mod config;
 mod functions;
 mod models;
 
@@ -7,6 +8,7 @@ use functions::{
     decrypt_private_key::decrypt_private_key,
     load_identity::load_identity,
     save_identity::save_identity,
+    register_identity::register_identity,
 };
 use std::path::Path;
 
@@ -23,6 +25,7 @@ enum Commands {
     Init,
     Login,
     Whoami,
+    Register,
 }
 
 fn main() {
@@ -94,6 +97,7 @@ fn main() {
         }
 
         Commands::Whoami => {
+
             let identity_path = Path::new("identity.nexo");
 
             let identity = load_identity(identity_path)
@@ -115,6 +119,34 @@ fn main() {
                 "Public key: {}",
                 hex::encode(verifying_key.to_bytes())
             );
+        }
+
+        Commands::Register => {
+            let config = config::load_config()
+                .expect("Failed to load config");
+
+            let identity_path = Path::new("identity.nexo");
+
+            let identity = load_identity(identity_path)
+                .expect("Failed to load identity");
+
+            let password = rpassword::prompt_password("Password: ")
+                .expect("Failed to read password");
+
+            let signing_key = decrypt_private_key(
+                &identity.encrypted_private_key,
+                &password,
+            )
+            .expect("Invalid password or corrupted identity");
+
+            register_identity(
+                &config,
+                &identity,
+                &signing_key,
+            )
+            .expect("Failed to register identity");
+
+            println!("Identity registered successfully.");
         }
     }
 }
