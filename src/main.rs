@@ -1,12 +1,14 @@
+mod chat;
 mod config;
 mod functions;
 mod models;
+mod overlay;
 
 use clap::{Parser, Subcommand};
 use config::{load_config, Config};
 use dialoguer::{Input, Password};
 use functions::{
-    authenticate::authenticate,
+    connect::connect,
     create_identity::create_identity,
     decrypt_private_key::decrypt_private_key,
     load_identity::load_identity,
@@ -14,6 +16,7 @@ use functions::{
     save_identity::save_identity,
     validate_nickname::validate_nickname,
 };
+use overlay::run_overlay;
 use std::{error::Error, path::Path, process};
 
 const IDENTITY_PATH: &str = "identity.nexo";
@@ -135,16 +138,11 @@ async fn login(config: &Config) -> Result<(), Box<dyn Error>> {
     )
         .map_err(|_| "Wrong password or corrupted identity file")?;
 
-    let nickname = authenticate(config, &signing_key).await?;
+    println!("Connecting to {} ...", config.server);
 
-    println!();
-    println!("Logged in as: {nickname}");
-    println!(
-        "Public key:   {}",
-        hex::encode(signing_key.verifying_key().to_bytes())
-    );
+    let (connection, nickname) = connect(config, &signing_key).await?;
 
-    Ok(())
+    run_overlay(connection, nickname, signing_key, config.server.clone()).await
 }
 
 fn whoami() -> Result<(), Box<dyn Error>> {
