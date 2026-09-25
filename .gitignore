@@ -1,2 +1,5 @@
 /target
 identity.nexo
+.idea
+.DS_Store
+Thumbs.db
