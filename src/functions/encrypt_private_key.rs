@@ -1,9 +1,10 @@
 use argon2::Argon2;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
-    Key, XChaCha20Poly1305, XNonce,
+    XChaCha20Poly1305, XNonce,
 };
 use ed25519_dalek::SigningKey;
+use zeroize::Zeroizing;
 use crate::models::encrypted_private_key::EncryptedPrivateKey;
 
 pub fn encrypt_private_key(
@@ -15,17 +16,18 @@ pub fn encrypt_private_key(
     getrandom::fill(&mut salt)?;
 
     // Aus dem Passwort einen 32-Byte-Schlüssel ableiten
-    let mut encryption_key = [0u8; 32];
+    // (Zeroizing überschreibt ihn beim Verlassen der Funktion mit Nullen)
+    let mut encryption_key = Zeroizing::new([0u8; 32]);
 
     Argon2::default().hash_password_into(
         password.as_bytes(),
         &salt,
-        &mut encryption_key,
+        encryption_key.as_mut_slice(),
     )?;
 
     // XChaCha20-Poly1305 mit dem abgeleiteten Schlüssel erzeugen
-    let key = Key::try_from(encryption_key.as_slice())?;
-    let cipher = XChaCha20Poly1305::new(&key);
+    // (die Cipher überschreibt ihre Kopie des Schlüssels beim Freigeben)
+    let cipher = XChaCha20Poly1305::new_from_slice(encryption_key.as_slice())?;
 
     // Zufällige Nonce erzeugen
     let mut nonce_bytes = [0u8; 24];
@@ -34,11 +36,11 @@ pub fn encrypt_private_key(
     let nonce = XNonce::try_from(nonce_bytes.as_slice())?;
 
     // Private Key verschlüsseln
-    let private_key_bytes = signing_key.to_bytes();
+    let private_key_bytes = Zeroizing::new(signing_key.to_bytes());
 
     let ciphertext = cipher.encrypt(
         &nonce,
-        private_key_bytes.as_ref(),
+        private_key_bytes.as_slice(),
     )?;
 
     Ok(EncryptedPrivateKey {

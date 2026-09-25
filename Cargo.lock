@@ -296,6 +296,7 @@ dependencies = [
  "cipher",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -308,6 +309,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -1616,6 +1618,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,11 +1,12 @@
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
-    Key, XChaCha20Poly1305, XNonce,
+    XChaCha20Poly1305, XNonce,
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 // Kontexte, damit Signaturen und Schlüssel nie für etwas anderes verwendet werden können
 const HANDSHAKE_CONTEXT: &[u8] = b"nexo-handshake-v1";
@@ -57,10 +58,11 @@ pub fn verify_handshake(
 }
 
 // Diffie-Hellman + HKDF. Beide Seiten erhalten denselben Schlüssel.
+// Er wird beim Freigeben mit Nullen überschrieben.
 pub fn derive_chat_key(
     own_secret: &StaticSecret,
     their_ephemeral_key: &PublicKey,
-) -> Option<[u8; 32]> {
+) -> Option<Zeroizing<[u8; 32]>> {
     let shared = own_secret.diffie_hellman(their_ephemeral_key);
 
     // Schutz gegen manipulierte Schlüssel, die ein bekanntes Ergebnis erzwingen
@@ -79,10 +81,10 @@ pub fn derive_chat_key(
 
     let info = [CHAT_KEY_INFO, first.as_slice(), second.as_slice()].concat();
 
-    let mut key = [0u8; 32];
+    let mut key = Zeroizing::new([0u8; 32]);
 
     Hkdf::<Sha256>::new(None, shared.as_bytes())
-        .expand(&info, &mut key)
+        .expand(&info, key.as_mut_slice())
         .ok()?;
 
     Some(key)
@@ -100,7 +102,7 @@ pub fn encrypt_text(
     to: &VerifyingKey,
     text: &str,
 ) -> Result<([u8; 24], Vec<u8>), Box<dyn std::error::Error>> {
-    let cipher = XChaCha20Poly1305::new(&Key::try_from(key.as_slice())?);
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice())?;
 
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut nonce)?;
@@ -123,7 +125,7 @@ pub fn decrypt_text(
     nonce: &[u8; 24],
     ciphertext: &[u8],
 ) -> Option<String> {
-    let cipher = XChaCha20Poly1305::new(&Key::try_from(key.as_slice()).ok()?);
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice()).ok()?;
 
     let plaintext = cipher
         .decrypt(

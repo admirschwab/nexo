@@ -18,6 +18,7 @@ use functions::{
 };
 use overlay::run_overlay;
 use std::{error::Error, path::Path, process};
+use zeroize::Zeroizing;
 
 const IDENTITY_PATH: &str = "identity.nexo";
 const PASSWORD_MIN_LENGTH: usize = 8;
@@ -82,7 +83,8 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
         })
         .interact_text()?;
 
-    let password = Password::new()
+    // Zeroizing überschreibt das Passwort beim Freigeben mit Nullen
+    let password = Zeroizing::new(Password::new()
         .with_prompt("Choose a password")
         .with_confirmation("Repeat password", "Passwords do not match")
         .validate_with(|password: &String| {
@@ -94,7 +96,7 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
                 ))
             }
         })
-        .interact()?;
+        .interact()?);
 
     let (identity, signing_key) = create_identity(nickname, &password)?;
 
@@ -128,9 +130,9 @@ async fn login(config: &Config) -> Result<(), Box<dyn Error>> {
 
     let identity = load_identity(identity_path)?;
 
-    let password = Password::new()
+    let password = Zeroizing::new(Password::new()
         .with_prompt("Password")
-        .interact()?;
+        .interact()?);
 
     let signing_key = decrypt_private_key(
         &identity.encrypted_private_key,
@@ -156,9 +158,9 @@ fn whoami() -> Result<(), Box<dyn Error>> {
 
     let identity = load_identity(identity_path)?;
 
-    let password = Password::new()
+    let password = Zeroizing::new(Password::new()
         .with_prompt("Password")
-        .interact()?;
+        .interact()?);
 
     let signing_key = decrypt_private_key(
         &identity.encrypted_private_key,

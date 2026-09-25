@@ -6,6 +6,7 @@ use crate::models::peer_message::PeerMessage;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use std::{collections::HashSet, error::Error, mem};
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 // Verschlüsselte Sitzung mit einem Gesprächspartner
 pub enum Session {
@@ -16,9 +17,9 @@ pub enum Session {
         secret: StaticSecret,
         queued: Vec<String>,
     },
-    // Chat-Schlüssel steht
+    // Chat-Schlüssel steht (wird beim Verwerfen mit Nullen überschrieben)
     Established {
-        key: [u8; 32],
+        key: Zeroizing<[u8; 32]>,
         // Schutz gegen erneut eingespielte Nachrichten
         seen_nonces: HashSet<[u8; 24]>,
     },

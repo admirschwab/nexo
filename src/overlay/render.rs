@@ -1,4 +1,4 @@
-use super::app::{App, Conversation, LineKind};
+use super::app::{App, Conversation, LineKind, MAX_INPUT_LENGTH};
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -197,10 +197,22 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
 
     let cursor_x = input_area.x + 1 + visible.chars().count() as u16;
 
-    frame.render_widget(
-        Paragraph::new(visible).block(Block::bordered().title(input_title)),
-        input_area,
-    );
+    // Zeichenzähler rechts oben, gelb ab 900, rot am Limit
+    let counter = format!(" {input_length}/{MAX_INPUT_LENGTH} ");
+
+    let counter = if input_length >= MAX_INPUT_LENGTH {
+        counter.red().bold()
+    } else if input_length >= MAX_INPUT_LENGTH * 9 / 10 {
+        counter.yellow()
+    } else {
+        counter.dark_gray()
+    };
+
+    let input_block = Block::bordered()
+        .title(input_title)
+        .title_top(Line::from(counter).right_aligned());
+
+    frame.render_widget(Paragraph::new(visible).block(input_block), input_area);
 
     frame.set_cursor_position((cursor_x, input_area.y + 1));
 }

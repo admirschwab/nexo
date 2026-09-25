@@ -22,6 +22,8 @@ pub enum ServerMessage {
     Received { from: String, payload: String },
     // Der Empfänger war nicht online, die Nachricht wurde verworfen
     NotDelivered { to: String },
+    // Wir schicken zu schnell, die Nachricht wurde verworfen
+    RateLimited { to: String },
 }
 
 #[derive(Serialize)]

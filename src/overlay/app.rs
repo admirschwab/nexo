@@ -9,8 +9,8 @@ use ratatui::{
     widgets::ListState,
 };
 
-// Längere Eingaben werden abgeschnitten
-const MAX_INPUT_LENGTH: usize = 1000;
+// Weitere Zeichen werden bei der Eingabe ignoriert
+pub const MAX_INPUT_LENGTH: usize = 1000;
 
 pub enum LineKind {
     Own,
@@ -214,6 +214,22 @@ impl App {
                         "{} is offline, message not delivered",
                         conversation.nickname
                     ));
+                }
+            }
+            ServerMessage::RateLimited { to } => {
+                if let Some(index) = self.find(&to) {
+                    let conversation = &mut self.conversations[index];
+
+                    conversation.system("Slow down, message not delivered".to_string());
+
+                    // War es der Handshake, würde die Sitzung sonst ewig warten
+                    if conversation.session.is_pending() {
+                        let dropped = conversation.session.reset();
+
+                        if dropped > 0 {
+                            conversation.system(format!("{dropped} message(s) could not be delivered"));
+                        }
+                    }
                 }
             }
             _ => {}
