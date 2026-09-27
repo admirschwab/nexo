@@ -9,7 +9,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 // Kontexte, damit Signaturen und Schlüssel nie für etwas anderes verwendet werden können
-const HANDSHAKE_CONTEXT: &[u8] = b"nexo-handshake-v1";
+const HANDSHAKE_INIT_CONTEXT: &[u8] = b"nexo-handshake-init-v1";
+const HANDSHAKE_REPLY_CONTEXT: &[u8] = b"nexo-handshake-reply-v1";
 const CHAT_KEY_INFO: &[u8] = b"nexo-chat-key-v1";
 
 pub fn generate_ephemeral_secret() -> Result<StaticSecret, getrandom::Error> {
@@ -19,15 +20,29 @@ pub fn generate_ephemeral_secret() -> Result<StaticSecret, getrandom::Error> {
     Ok(StaticSecret::from(bytes))
 }
 
-// Signiert wird: Kontext + eigener X25519-Key + Absender + Empfänger.
-// So kann ein Handshake nicht an einen anderen Empfänger umgeleitet werden.
+// Ob ein Handshake eine neue Sitzung beginnt oder auf einen Beginn antwortet
+#[derive(Clone, Copy)]
+pub enum HandshakeRole {
+    Init,
+    Reply,
+}
+
+// Signiert wird: Kontext (je nach Rolle) + eigener X25519-Key + Absender + Empfänger.
+// So kann ein Handshake nicht an einen anderen Empfänger umgeleitet
+// und eine Antwort nicht als Beginn ausgegeben werden (oder umgekehrt).
 fn handshake_transcript(
+    role: HandshakeRole,
     ephemeral_key: &[u8; 32],
     from: &VerifyingKey,
     to: &VerifyingKey,
 ) -> Vec<u8> {
+    let context = match role {
+        HandshakeRole::Init => HANDSHAKE_INIT_CONTEXT,
+        HandshakeRole::Reply => HANDSHAKE_REPLY_CONTEXT,
+    };
+
     [
-        HANDSHAKE_CONTEXT,
+        context,
         ephemeral_key.as_slice(),
         from.as_bytes().as_slice(),
         to.as_bytes().as_slice(),
@@ -36,11 +51,13 @@ fn handshake_transcript(
 }
 
 pub fn sign_handshake(
+    role: HandshakeRole,
     signing_key: &SigningKey,
     ephemeral_key: &PublicKey,
     to: &VerifyingKey,
 ) -> Signature {
     signing_key.sign(&handshake_transcript(
+        role,
         ephemeral_key.as_bytes(),
         &signing_key.verifying_key(),
         to,
@@ -48,12 +65,13 @@ pub fn sign_handshake(
 }
 
 pub fn verify_handshake(
+    role: HandshakeRole,
     from: &VerifyingKey,
     to: &VerifyingKey,
     ephemeral_key: &[u8; 32],
     signature: &Signature,
 ) -> bool {
-    from.verify(&handshake_transcript(ephemeral_key, from, to), signature)
+    from.verify(&handshake_transcript(role, ephemeral_key, from, to), signature)
         .is_ok()
 }
 

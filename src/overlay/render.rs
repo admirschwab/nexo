@@ -1,4 +1,5 @@
 use super::app::{App, Conversation, LineKind, MAX_INPUT_LENGTH};
+use crate::chat::known_peers::PeerTrust;
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -20,7 +21,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let hint = match app.open_conversation() {
         Some(conversation) => {
             render_chat(frame, app, conversation, main_area);
-            "Enter send · Esc back to list · Ctrl+C quit"
+
+            if conversation.trust.is_warning() {
+                "Ctrl+T accept new key · Esc back to list · Ctrl+C quit"
+            } else {
+                "Enter send · Esc back to list · Ctrl+C quit"
+            }
         }
         None => {
             render_list(frame, app, main_area);
@@ -84,7 +90,9 @@ fn render_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 format!("{:<16}", short_key(&conversation.public_key)).dark_gray(),
             ];
 
-            if !conversation.online {
+            if conversation.trust.is_warning() {
+                spans.push("⚠ key changed".red().bold());
+            } else if !conversation.online {
                 spans.push("offline".into());
             } else if conversation.unread > 0 {
                 spans.push(format!("● {} new", conversation.unread).yellow().bold());
@@ -110,7 +118,7 @@ fn render_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: Rect) {
     let [info_area, messages_area, input_area] = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(5),
         Constraint::Min(3),
         Constraint::Length(3),
     ])
@@ -133,6 +141,7 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
             fingerprint(&conversation.public_key).into(),
         ]),
         Line::from(vec!["Status:      ".dark_gray(), state]),
+        Line::from(vec!["Key:         ".dark_gray(), trust_label(&conversation.trust)]),
     ])
         .block(Block::bordered().title(format!(" Chat with {} ", conversation.nickname).bold()));
 
@@ -215,6 +224,18 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
     frame.render_widget(Paragraph::new(visible).block(input_block), input_area);
 
     frame.set_cursor_position((cursor_x, input_area.y + 1));
+}
+
+// Ob der Schlüssel zu dem passt, was wir uns beim ersten Chat gemerkt haben
+fn trust_label(trust: &PeerTrust) -> Span<'static> {
+    match trust {
+        PeerTrust::New => "new contact · compare the fingerprint to be sure".dark_gray(),
+        PeerTrust::Known => "same key as in earlier chats".green(),
+        PeerTrust::KeyChanged => "⚠ KEY CHANGED · possible attack, sending blocked".red().bold(),
+        PeerTrust::NicknameChanged { previous } => {
+            format!("⚠ this key was known as '{previous}' · sending blocked").red().bold()
+        }
+    }
 }
 
 // Kurzform des Public Keys für die Liste, z. B. "3f9a1c2e…b21e"

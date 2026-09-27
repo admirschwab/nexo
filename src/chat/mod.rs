@@ -10,4 +10,5 @@
 // verloren gehen, bleiben alte Nachrichten auch mit identity.nexo + Passwort unlesbar.
 
 pub mod crypto;
+pub mod known_peers;
 pub mod session;

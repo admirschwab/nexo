@@ -1,6 +1,6 @@
 use super::crypto::{
     decrypt_text, derive_chat_key, encrypt_text, generate_ephemeral_secret, sign_handshake,
-    verify_handshake,
+    verify_handshake, HandshakeRole,
 };
 use crate::models::peer_message::PeerMessage;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
@@ -66,7 +66,7 @@ impl Session {
             }
             Session::None => {
                 let secret = generate_ephemeral_secret()?;
-                let handshake = handshake_message(me, peer, &secret);
+                let handshake = handshake_message(HandshakeRole::Init, me, peer, &secret);
 
                 *self = Session::Pending {
                     secret,
@@ -80,6 +80,7 @@ impl Session {
 
     pub fn receive_handshake(
         &mut self,
+        role: HandshakeRole,
         me: &SigningKey,
         peer: &VerifyingKey,
         ephemeral_key: &str,
@@ -91,16 +92,16 @@ impl Session {
 
         let signature = Signature::from_slice(&hex::decode(signature)?)?;
 
-        if !verify_handshake(peer, &me.verifying_key(), &ephemeral_key, &signature) {
+        if !verify_handshake(role, peer, &me.verifying_key(), &ephemeral_key, &signature) {
             return Err("Invalid handshake signature".into());
         }
 
         let their_key = PublicKey::from(ephemeral_key);
 
-        match mem::replace(self, Session::None) {
+        match (role, mem::replace(self, Session::None)) {
             // Antwort auf unseren Handshake (oder beide haben gleichzeitig angefangen,
             // dann ergibt Diffie-Hellman auf beiden Seiten trotzdem denselben Schlüssel)
-            Session::Pending { secret, queued } => {
+            (_, Session::Pending { secret, queued }) => {
                 let key = derive_chat_key(&secret, &their_key)
                     .ok_or("Invalid ephemeral key")?;
 
@@ -116,14 +117,16 @@ impl Session {
 
                 Ok(messages)
             }
-            // Der Partner startet eine neue Sitzung: mit eigenem frischem Schlüssel antworten
-            Session::None | Session::Established { .. } => {
+            // Der Partner startet eine neue Sitzung: mit eigenem frischem Schlüssel antworten.
+            // Die Antwort ist als Reply markiert und wird selbst nie beantwortet,
+            // so können sich zwei Clients nicht endlos gegenseitig neu verschlüsseln.
+            (HandshakeRole::Init, Session::None | Session::Established { .. }) => {
                 let secret = generate_ephemeral_secret()?;
 
                 let key = derive_chat_key(&secret, &their_key)
                     .ok_or("Invalid ephemeral key")?;
 
-                let reply = handshake_message(me, peer, &secret);
+                let reply = handshake_message(HandshakeRole::Reply, me, peer, &secret);
 
                 *self = Session::Established {
                     key,
@@ -131,6 +134,12 @@ impl Session {
                 };
 
                 Ok(vec![reply])
+            }
+            // Antwort, obwohl wir auf keine warten (z. B. doppelt oder erneut
+            // eingespielt): ignorieren und die bestehende Sitzung behalten
+            (HandshakeRole::Reply, previous) => {
+                *self = previous;
+                Err("Unexpected key exchange reply".into())
             }
         }
     }
@@ -170,7 +179,7 @@ impl Session {
             // Der Partner hält noch eine alte Sitzung: neu aushandeln
             Session::None => match generate_ephemeral_secret() {
                 Ok(secret) => {
-                    let handshake = handshake_message(me, peer, &secret);
+                    let handshake = handshake_message(HandshakeRole::Init, me, peer, &secret);
 
                     *self = Session::Pending {
                         secret,
@@ -187,16 +196,26 @@ impl Session {
 }
 
 fn handshake_message(
+    role: HandshakeRole,
     me: &SigningKey,
     peer: &VerifyingKey,
     secret: &StaticSecret,
 ) -> PeerMessage {
     let ephemeral_key = PublicKey::from(secret);
-    let signature = sign_handshake(me, &ephemeral_key, peer);
+    let signature = sign_handshake(role, me, &ephemeral_key, peer);
 
-    PeerMessage::Handshake {
-        ephemeral_key: hex::encode(ephemeral_key.as_bytes()),
-        signature: hex::encode(signature.to_bytes()),
+    let ephemeral_key = hex::encode(ephemeral_key.as_bytes());
+    let signature = hex::encode(signature.to_bytes());
+
+    match role {
+        HandshakeRole::Init => PeerMessage::HandshakeInit {
+            ephemeral_key,
+            signature,
+        },
+        HandshakeRole::Reply => PeerMessage::HandshakeReply {
+            ephemeral_key,
+            signature,
+        },
     }
 }
 

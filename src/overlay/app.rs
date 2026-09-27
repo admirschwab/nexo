@@ -1,4 +1,8 @@
-use crate::chat::session::{ReceivedText, Session};
+use crate::chat::{
+    crypto::HandshakeRole,
+    known_peers::{KnownPeers, PeerTrust},
+    session::{ReceivedText, Session},
+};
 use crate::models::{
     peer_message::PeerMessage,
     protocol::{ClientMessage, OnlineUser, ServerMessage},
@@ -37,6 +41,8 @@ pub struct Conversation {
     pub lines: Vec<ChatLine>,
     pub unread: usize,
     pub session: Session,
+    // Passt der Schlüssel zu dem, was wir uns beim ersten Chat gemerkt haben?
+    pub trust: PeerTrust,
 }
 
 impl Conversation {
@@ -66,6 +72,7 @@ pub struct App {
     pub public_key: String,
     pub server: String,
     signing_key: SigningKey,
+    known_peers: KnownPeers,
     pub connected: bool,
     pub conversations: Vec<Conversation>,
     pub list_state: ListState,
@@ -78,12 +85,18 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(nickname: String, signing_key: SigningKey, server: String) -> Self {
+    pub fn new(
+        nickname: String,
+        signing_key: SigningKey,
+        known_peers: KnownPeers,
+        server: String,
+    ) -> Self {
         Self {
             nickname,
             public_key: hex::encode(signing_key.verifying_key().to_bytes()),
             server,
             signing_key,
+            known_peers,
             connected: true,
             conversations: Vec::new(),
             list_state: ListState::default(),
@@ -149,6 +162,7 @@ impl App {
                 self.status.clear();
             }
             KeyCode::Enter => self.send_input(),
+            KeyCode::Char('t') if key.modifiers == KeyModifiers::CONTROL => self.accept_key(),
             KeyCode::Backspace => {
                 self.input.pop();
             }
@@ -187,6 +201,16 @@ impl App {
             return;
         }
 
+        // Möglicher Angriff: nichts schicken, bis der Nutzer den Schlüssel bewusst akzeptiert
+        if conversation.trust.is_warning() {
+            conversation.system(
+                "Sending blocked because the key does not match. Compare the fingerprint \
+                 with your contact another way, then press Ctrl+T to accept the new key."
+                    .to_string(),
+            );
+            return;
+        }
+
         self.input.clear();
 
         match conversation.session.send_text(
@@ -197,8 +221,71 @@ impl App {
             Ok(messages) => {
                 conversation.push(LineKind::Own, text);
                 queue(&mut self.outgoing, &conversation.public_key, messages);
+                self.remember_peer(index);
             }
             Err(error) => conversation.system(format!("Could not send message: {error}")),
+        }
+    }
+
+    // Merkt sich den Schlüssel beim ersten Nachrichtenaustausch
+    fn remember_peer(&mut self, index: usize) {
+        let conversation = &mut self.conversations[index];
+
+        if conversation.trust != PeerTrust::New {
+            return;
+        }
+
+        if let Err(error) = self
+            .known_peers
+            .remember(&conversation.nickname, &conversation.public_key)
+        {
+            conversation.system(format!(
+                "Could not save the key of {}: {error}",
+                conversation.nickname
+            ));
+            return;
+        }
+
+        self.refresh_trust();
+    }
+
+    // Akzeptiert einen geänderten Schlüssel für den offenen Chat
+    fn accept_key(&mut self) {
+        let View::Chat(public_key) = &self.view else {
+            return;
+        };
+
+        let Some(index) = self.find(public_key) else {
+            return;
+        };
+
+        let conversation = &mut self.conversations[index];
+
+        if !conversation.trust.is_warning() {
+            return;
+        }
+
+        if let Err(error) = self
+            .known_peers
+            .remember(&conversation.nickname, &conversation.public_key)
+        {
+            conversation.system(format!("Could not save the key: {error}"));
+            return;
+        }
+
+        conversation.system(format!(
+            "New key for {} accepted. Only do this after comparing the fingerprint.",
+            conversation.nickname
+        ));
+
+        self.refresh_trust();
+    }
+
+    fn refresh_trust(&mut self) {
+        for conversation in &mut self.conversations {
+            conversation.trust = self
+                .known_peers
+                .check(&conversation.nickname, &conversation.public_key);
         }
     }
 
@@ -246,14 +333,24 @@ impl App {
             return;
         };
 
+        let role = match message {
+            PeerMessage::HandshakeReply { .. } => HandshakeRole::Reply,
+            _ => HandshakeRole::Init,
+        };
+
         let viewing = self.view == View::Chat(from.clone());
         let conversation = &mut self.conversations[index];
 
         match message {
-            PeerMessage::Handshake {
+            PeerMessage::HandshakeInit {
+                ephemeral_key,
+                signature,
+            }
+            | PeerMessage::HandshakeReply {
                 ephemeral_key,
                 signature,
             } => match conversation.session.receive_handshake(
+                role,
                 &self.signing_key,
                 &conversation.verifying_key,
                 &ephemeral_key,
@@ -279,6 +376,8 @@ impl App {
                         conversation.unread += 1;
                         self.status = format!("New message from {}", conversation.nickname);
                     }
+
+                    self.remember_peer(index);
                 }
                 ReceivedText::NoSession(messages) => {
                     conversation.system(format!(
@@ -371,7 +470,9 @@ impl App {
                 continue;
             };
 
-            self.conversations.push(Conversation {
+            let trust = self.known_peers.check(&user.nickname, &user.public_key);
+
+            let mut conversation = Conversation {
                 nickname: user.nickname,
                 public_key: user.public_key,
                 verifying_key,
@@ -380,7 +481,33 @@ impl App {
                 lines: Vec::new(),
                 unread: 0,
                 session: Session::None,
-            });
+                trust,
+            };
+
+            match conversation.trust.clone() {
+                PeerTrust::KeyChanged => {
+                    conversation.system(format!(
+                        "WARNING: {} has a different key than when you last chatted. \
+                         Someone may be trying to intercept your messages.",
+                        conversation.nickname
+                    ));
+                    self.status = format!("Warning: the key of {} has changed", conversation.nickname);
+                }
+                PeerTrust::NicknameChanged { previous } => {
+                    conversation.system(format!(
+                        "WARNING: this key belonged to '{previous}' when you last chatted, \
+                         now it appears as '{}'.",
+                        conversation.nickname
+                    ));
+                    self.status = format!(
+                        "Warning: '{previous}' now appears as '{}'",
+                        conversation.nickname
+                    );
+                }
+                PeerTrust::New | PeerTrust::Known => {}
+            }
+
+            self.conversations.push(conversation);
         }
 
         // Offline ohne Verlauf braucht niemand in der Liste

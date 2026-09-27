@@ -5,7 +5,9 @@ use futures_util::{SinkExt, StreamExt};
 use std::error::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+    connect_async,
+    tungstenite::{self, http::StatusCode, Message},
+    MaybeTlsStream, WebSocketStream,
 };
 
 pub type Connection = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -19,9 +21,14 @@ pub async fn connect(
 ) -> Result<(Connection, String), Box<dyn Error>> {
     let url = websocket_url(&config.server)?;
 
-    let (mut connection, _) = connect_async(url)
-        .await
-        .map_err(|_| format!("Could not reach the Nexo server at {}", config.server))?;
+    let (mut connection, _) = connect_async(url).await.map_err(|error| match error {
+        tungstenite::Error::Http(response)
+            if response.status() == StatusCode::TOO_MANY_REQUESTS =>
+        {
+            "Too many connection attempts. Please wait a moment and try again.".to_string()
+        }
+        _ => format!("Could not reach the Nexo server at {}", config.server),
+    })?;
 
     let ServerMessage::Challenge { challenge } = next_message(&mut connection).await? else {
         return Err("Unexpected message from server".into());

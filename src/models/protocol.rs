@@ -37,3 +37,7 @@ pub enum ClientMessage {
 // Wird vor die Challenge gesetzt und mitsigniert, damit eine Login-Signatur
 // nie mit einer anderen Signatur des Clients verwechselt werden kann
 pub const AUTH_CONTEXT: &[u8] = b"nexo-auth-v1";
+
+// Kontext für die Signatur bei der Registrierung (Kontext + Public Key + Nickname).
+// Damit beweisen wir dem Server, dass wir den privaten Schlüssel besitzen.
+pub const REGISTER_CONTEXT: &[u8] = b"nexo-register-v1";

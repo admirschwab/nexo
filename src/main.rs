@@ -4,6 +4,7 @@ mod functions;
 mod models;
 mod overlay;
 
+use chat::known_peers::KnownPeers;
 use clap::{Parser, Subcommand};
 use config::{load_config, Config};
 use dialoguer::{Input, Password};
@@ -17,10 +18,14 @@ use functions::{
     validate_nickname::validate_nickname,
 };
 use overlay::run_overlay;
-use std::{error::Error, path::Path, process};
+use std::{error::Error, fs, path::Path, process};
 use zeroize::Zeroizing;
 
 const IDENTITY_PATH: &str = "identity.nexo";
+// Zwischendatei während der Registrierung
+const PENDING_IDENTITY_PATH: &str = "identity.nexo.pending";
+// Verschlüsselte Liste der Schlüssel von Gesprächspartnern (siehe chat/known_peers.rs)
+const KNOWN_PEERS_PATH: &str = "known_peers.nexo";
 const PASSWORD_MIN_LENGTH: usize = 8;
 
 #[derive(Parser)]
@@ -72,6 +77,17 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
         );
     }
 
+    // Übrig von einer abgebrochenen Registrierung. Ob sie beim Server angekommen ist,
+    // lässt sich nicht sicher sagen, also nichts automatisch löschen.
+    if Path::new(PENDING_IDENTITY_PATH).exists() {
+        return Err(format!(
+            "An unfinished registration was found ({PENDING_IDENTITY_PATH}). \
+             If it was registered successfully, rename it to {IDENTITY_PATH}; \
+             otherwise delete it and run `nexo register` again."
+        )
+            .into());
+    }
+
     let nickname: String = Input::new()
         .with_prompt("Choose a nickname")
         .validate_with(|nickname: &String| {
@@ -100,11 +116,25 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
 
     let (identity, signing_key) = create_identity(nickname, &password)?;
 
-    // Erst beim Server registrieren, dann lokal speichern:
-    // Ist der Nickname vergeben, bleibt keine Identitätsdatei zurück
-    register_identity(config, &identity, &signing_key).await?;
+    // Erst lokal in eine Zwischendatei speichern, dann registrieren, dann umbenennen.
+    // So geht der Schlüssel nie verloren, wenn der Nickname schon registriert ist,
+    // und wenn die Registrierung scheitert, bleibt keine Identitätsdatei zurück.
+    let pending_path = Path::new(PENDING_IDENTITY_PATH);
 
-    save_identity(identity_path, &identity)?;
+    save_identity(pending_path, &identity)
+        .map_err(|error| format!("Could not save {PENDING_IDENTITY_PATH}: {error}"))?;
+
+    if let Err(error) = register_identity(config, &identity, &signing_key).await {
+        let _ = fs::remove_file(pending_path);
+        return Err(error);
+    }
+
+    fs::rename(pending_path, identity_path).map_err(|error| {
+        format!(
+            "Registered, but could not rename {PENDING_IDENTITY_PATH} to {IDENTITY_PATH}: {error}. \
+             Please rename it yourself, it contains your identity."
+        )
+    })?;
 
     println!();
     println!("Registered successfully.");
@@ -140,11 +170,14 @@ async fn login(config: &Config) -> Result<(), Box<dyn Error>> {
     )
         .map_err(|_| "Wrong password or corrupted identity file")?;
 
+    // Schlüssel der Gesprächspartner, die wir uns beim ersten Chat gemerkt haben
+    let known_peers = KnownPeers::load(Path::new(KNOWN_PEERS_PATH), &signing_key)?;
+
     println!("Connecting to {} ...", config.server);
 
     let (connection, nickname) = connect(config, &signing_key).await?;
 
-    run_overlay(connection, nickname, signing_key, config.server.clone()).await
+    run_overlay(connection, nickname, signing_key, known_peers, config.server.clone()).await
 }
 
 fn whoami() -> Result<(), Box<dyn Error>> {

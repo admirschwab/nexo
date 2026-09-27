@@ -1,6 +1,7 @@
 mod app;
 mod render;
 
+use crate::chat::known_peers::KnownPeers;
 use crate::functions::connect::Connection;
 use crate::models::protocol::ServerMessage;
 use app::App;
@@ -8,8 +9,13 @@ use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
 use ratatui::crossterm::event::{Event, EventStream, KeyEventKind};
 use render::render;
-use std::{error::Error, mem};
+use std::{error::Error, mem, time::Duration};
+use tokio::time::{sleep_until, Instant};
 use tokio_tungstenite::tungstenite::Message;
+
+// Der Server schickt alle 20 Sekunden ein Ping. Kommt so lange gar nichts,
+// ist die Verbindung tot (z. B. WLAN weg), auch wenn TCP das noch nicht bemerkt hat.
+const SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 
 // Startet das Vollbild-Overlay nach dem Login.
 // Läuft, bis der Nutzer es beendet; danach wird die Verbindung geschlossen
@@ -18,12 +24,14 @@ pub async fn run_overlay(
     connection: Connection,
     nickname: String,
     signing_key: SigningKey,
+    known_peers: KnownPeers,
     server: String,
 ) -> Result<(), Box<dyn Error>> {
     let (mut ws_sender, mut ws_receiver) = connection.split();
 
-    let mut app = App::new(nickname, signing_key, server);
+    let mut app = App::new(nickname, signing_key, known_peers, server);
     let mut events = EventStream::new();
+    let mut last_seen = Instant::now();
 
     // Stellt das Terminal auch bei einem Panic wieder her
     let mut terminal = ratatui::init();
@@ -44,14 +52,23 @@ pub async fn run_overlay(
                 None => break Ok(()),
             },
 
-            message = ws_receiver.next(), if app.connected => match message {
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(message) = serde_json::from_str::<ServerMessage>(&text) {
-                        app.handle_server_message(message);
+            message = ws_receiver.next(), if app.connected => {
+                last_seen = Instant::now();
+
+                match message {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(message) = serde_json::from_str::<ServerMessage>(&text) {
+                            app.handle_server_message(message);
+                        }
                     }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => app.disconnected(),
+                    // Pings beantwortet tungstenite selbst
+                    Some(Ok(_)) => {}
                 }
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => app.disconnected(),
-                Some(Ok(_)) => {}
+            },
+
+            _ = sleep_until(last_seen + SERVER_TIMEOUT), if app.connected => {
+                app.disconnected();
             },
         }
 
