@@ -11,6 +11,7 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     widgets::ListState,
 };
+use unicode_segmentation::UnicodeSegmentation;
 use zeroize::{Zeroize, Zeroizing};
 
 // Weitere Zeichen werden bei der Eingabe ignoriert
@@ -163,8 +164,12 @@ impl App {
                 self.status.clear();
             }
             KeyCode::Enter => self.send_input(),
+            // Löscht ein ganzes sichtbares Zeichen. Viele Emojis bestehen aus mehreren
+            // Teilen (z. B. 👍🏽 oder 👨‍👩‍👧), die sonst einzeln gelöscht würden.
             KeyCode::Backspace => {
-                self.input.pop();
+                if let Some((start, _)) = self.input.grapheme_indices(true).next_back() {
+                    self.input.truncate(start);
+                }
             }
             // AltGr-Zeichen (z. B. @ auf deutscher Tastatur) kommen als Strg+Alt an
             KeyCode::Char(c) if key.modifiers != KeyModifiers::CONTROL => {

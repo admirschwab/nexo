@@ -1,4 +1,6 @@
 use super::app::{App, Conversation, LineKind, MAX_INPUT_LENGTH};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -187,19 +189,28 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
         " Offline, cannot send "
     };
 
-    let width = input_area.width.saturating_sub(2) as usize;
     let input_length = app.input.chars().count();
 
-    // Bei langen Eingaben nur das Ende anzeigen (ausgeliehen, nicht kopiert)
-    let hidden = input_length.saturating_sub(width.saturating_sub(1));
+    // Bei langen Eingaben nur das Ende anzeigen (ausgeliehen, nicht kopiert).
+    // Gerechnet wird mit der Breite auf dem Bildschirm: Emojis und viele
+    // asiatische Schriftzeichen belegen zwei Spalten. Eine Spalte bleibt für den Cursor frei.
+    let available = input_area.width.saturating_sub(3) as usize;
+    let mut visible_start = app.input.len();
+    let mut visible_width = 0;
 
-    let visible = app
-        .input
-        .char_indices()
-        .nth(hidden)
-        .map_or("", |(offset, _)| &app.input[offset..]);
+    for (start, grapheme) in app.input.grapheme_indices(true).rev() {
+        let grapheme_width = grapheme.width();
 
-    let cursor_x = input_area.x + 1 + (input_length - hidden) as u16;
+        if visible_width + grapheme_width > available {
+            break;
+        }
+
+        visible_width += grapheme_width;
+        visible_start = start;
+    }
+
+    let visible = &app.input[visible_start..];
+    let cursor_x = input_area.x + 1 + visible_width as u16;
 
     // Zeichenzähler rechts oben, gelb ab 900, rot am Limit
     let counter = format!(" {input_length}/{MAX_INPUT_LENGTH} ");

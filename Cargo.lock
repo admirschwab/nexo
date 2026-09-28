@@ -1648,6 +1648,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "unicode-segmentation",
+ "unicode-width",
  "x25519-dalek",
  "zeroize",
 ]
