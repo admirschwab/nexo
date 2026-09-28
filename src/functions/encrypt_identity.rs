@@ -1,6 +1,6 @@
 use crate::functions::derive_file_key::derive_file_key;
 use crate::models::{
-    encrypted_identity::{EncryptedIdentity, IdentityFormat, KdfParams},
+    encrypted_identity::{EncryptedIdentity, IdentityFormat, KdfParams, MAGIC_V3},
     identity::Identity,
 };
 use chacha20poly1305::{
@@ -9,7 +9,8 @@ use chacha20poly1305::{
 };
 use zeroize::Zeroizing;
 
-// Verschlüsselt privaten Schlüssel und Nickname mit dem Passwort (immer Format 2)
+// Verschlüsselt privaten Schlüssel, Nickname und Server-Adresse mit dem Passwort
+// (immer im aktuellen Format)
 pub fn encrypt_identity(
     identity: &Identity,
     password: &str,
@@ -30,11 +31,19 @@ pub fn encrypt_identity(
     // Die Cipher überschreibt ihre Kopie des Schlüssels beim Freigeben
     let cipher = XChaCha20Poly1305::new_from_slice(encryption_key.as_slice())?;
 
-    // Klartext: privater Schlüssel (32 Bytes) + Nickname
+    let nickname_length: u16 = identity
+        .nickname
+        .len()
+        .try_into()
+        .map_err(|_| "Nickname is too long")?;
+
+    // Klartext: privater Schlüssel | Länge des Nicknames | Nickname | Server-Adresse
     let plaintext = Zeroizing::new(
         [
             identity.signing_key.to_bytes().as_slice(),
+            &nickname_length.to_le_bytes(),
             identity.nickname.as_bytes(),
+            identity.server.as_bytes(),
         ]
             .concat(),
     );
@@ -43,12 +52,12 @@ pub fn encrypt_identity(
         &XNonce::try_from(nonce.as_slice())?,
         Payload {
             msg: &plaintext,
-            aad: &EncryptedIdentity::header_v2(&kdf, &salt, &nonce),
+            aad: &EncryptedIdentity::header(MAGIC_V3, &kdf, &salt, &nonce),
         },
     )?;
 
     Ok(EncryptedIdentity {
-        format: IdentityFormat::V2,
+        format: IdentityFormat::V3,
         kdf,
         salt,
         nonce,

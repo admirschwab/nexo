@@ -1,20 +1,20 @@
-use crate::models::encrypted_identity::{EncryptedIdentity, IdentityFormat};
+use crate::models::encrypted_identity::{EncryptedIdentity, MAGIC_V3};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
-// Schreibt die Identität in eine neue Datei (immer Format 2). Eine vorhandene
+// Schreibt die Identität in eine neue Datei (immer das aktuelle Format). Eine vorhandene
 // Datei wird nie überschrieben, damit kein Schlüssel versehentlich verloren geht.
 pub fn save_identity(
     path: &Path,
     identity: &EncryptedIdentity,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !matches!(identity.format, IdentityFormat::V2) {
+    if !identity.format.is_current() {
         return Err("Only the current identity file format can be saved".into());
     }
 
     let data = [
-        EncryptedIdentity::header_v2(&identity.kdf, &identity.salt, &identity.nonce),
+        EncryptedIdentity::header(MAGIC_V3, &identity.kdf, &identity.salt, &identity.nonce),
         identity.ciphertext.clone(),
     ]
         .concat();

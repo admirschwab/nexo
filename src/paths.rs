@@ -13,15 +13,21 @@ use std::{
 // Bewusst der lokale und nicht der Roaming-Ordner (%APPDATA%): Roaming-Profile
 // werden in Firmennetzen auf einen Server synchronisiert. Die Identität soll
 // diesen Rechner nie verlassen.
+//
+// Nexo speichert nur eine einzige Datei: identity.nexo. Sie enthält privaten
+// Schlüssel, Nickname und Server-Adresse, alles mit dem Passwort verschlüsselt.
 
 const APP_DIR: &str = "nexo";
 
 pub const IDENTITY_FILE: &str = "identity.nexo";
 // Zwischendatei während der Registrierung
-pub const PENDING_IDENTITY_FILE: &str = "identity.nexo.pending";
-// Zwischendatei beim Umwandeln einer alten Identitätsdatei
-pub const UPGRADE_IDENTITY_FILE: &str = "identity.nexo.upgrade";
-pub const CONFIG_FILE: &str = "config.toml";
+const PENDING_IDENTITY_FILE: &str = "identity.nexo.pending";
+// Zwischendatei beim Neuschreiben der Identitätsdatei
+const REWRITE_IDENTITY_FILE: &str = "identity.nexo.upgrade";
+
+// Von früheren Versionen: Server-Adresse im Klartext. Wird beim nächsten Login
+// in identity.nexo übernommen und dann gelöscht.
+const OLD_CONFIG_FILE: &str = "config.toml";
 
 // Von früheren Versionen: gemerkte Schlüssel der Gesprächspartner.
 // Wird nicht mehr verwendet und gelöscht, wo sie noch liegt.
@@ -31,8 +37,8 @@ pub struct Paths {
     pub dir: PathBuf,
     pub identity: PathBuf,
     pub pending_identity: PathBuf,
-    pub upgrade_identity: PathBuf,
-    pub config: PathBuf,
+    pub rewrite_identity: PathBuf,
+    pub old_config: PathBuf,
 }
 
 impl Paths {
@@ -48,8 +54,8 @@ impl Paths {
         Ok(Self {
             identity: dir.join(IDENTITY_FILE),
             pending_identity: dir.join(PENDING_IDENTITY_FILE),
-            upgrade_identity: dir.join(UPGRADE_IDENTITY_FILE),
-            config: dir.join(CONFIG_FILE),
+            rewrite_identity: dir.join(REWRITE_IDENTITY_FILE),
+            old_config: dir.join(OLD_CONFIG_FILE),
             dir,
         })
     }
@@ -66,16 +72,8 @@ impl Paths {
             println!("Moved your identity to {}", self.identity.display());
         }
 
-        // Die Konfiguration enthält nichts Geheimes und wird nur kopiert
-        let old_config = current.join(CONFIG_FILE);
-
-        if !self.config.exists()
-            && old_config.is_file()
-            && fs::metadata(&old_config)?.len() > 0
-        {
-            fs::copy(&old_config, &self.config)?;
-            println!("Copied config.toml to {}", self.config.display());
-        }
+        // Eine alte config.toml im aktuellen Ordner wird nur gelesen (siehe
+        // old_server_address), nie gelöscht: Sie kann zu einem Git-Repository gehören.
 
         // Gemerkte Schlüssel werden nicht mehr gespeichert: alte Dateien löschen
         for old_known_peers in [current.join(OLD_KNOWN_PEERS_FILE), self.dir.join(OLD_KNOWN_PEERS_FILE)] {
@@ -86,6 +84,20 @@ impl Paths {
         }
 
         Ok(())
+    }
+
+    // Server-Adresse aus einer config.toml früherer Versionen, falls vorhanden
+    pub fn old_server_address(&self) -> Option<String> {
+        [self.old_config.clone(), Path::new(".").join(OLD_CONFIG_FILE)]
+            .iter()
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .find_map(|data| {
+                toml::from_str::<toml::Table>(&data)
+                    .ok()?
+                    .get("server")?
+                    .as_str()
+                    .map(str::to_string)
+            })
     }
 }
 

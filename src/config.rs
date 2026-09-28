@@ -1,29 +1,24 @@
-use serde::Deserialize;
-use std::{fs, path::Path};
+// Die Server-Adresse steht verschlüsselt in identity.nexo (siehe paths.rs).
+// Ohne Passwort verrät der Rechner also nicht, welchen Nexo-Server man nutzt.
 
-// Wird beim ersten Start angelegt, wenn es noch keine config.toml gibt
-const DEFAULT_CONFIG: &str = "# Address of the Nexo server (http:// or https://)
-server = \"http://127.0.0.1:3000\"
-";
+pub const DEFAULT_SERVER: &str = "http://127.0.0.1:3000";
 
-#[derive(Debug, Deserialize)]
 pub struct Config {
     pub server: String,
 }
 
-pub fn load_config(path: &Path) -> Result<Config, Box<dyn std::error::Error>> {
-    if !path.exists() {
-        fs::write(path, DEFAULT_CONFIG)?;
+// Die Adresse muss mit http:// oder https:// beginnen
+pub fn validate_server(server: &str) -> Result<(), &'static str> {
+    let rest = server
+        .strip_prefix("https://")
+        .or_else(|| server.strip_prefix("http://"))
+        .ok_or("The server address must start with http:// or https://")?;
 
-        println!("Created {} (server: http://127.0.0.1:3000).", path.display());
-        println!("Edit this file to use another server.");
-        println!();
+    if rest.trim_end_matches('/').is_empty() {
+        return Err("The server address is missing a host name");
     }
 
-    let data = fs::read_to_string(path)?;
-    let config = toml::from_str(&data)?;
-
-    Ok(config)
+    Ok(())
 }
 
 // Ohne https ist die Verbindung zum Server unverschlüsselt. Die Nachrichten
@@ -47,7 +42,7 @@ pub fn warn_if_insecure(config: &Config) {
         return;
     }
 
-    eprintln!("Warning: the connection to {} is not encrypted (http instead of https).", config.server);
+    eprintln!("Warning: the connection to the server is not encrypted (http instead of https).");
     eprintln!("         Your messages stay end-to-end encrypted, but anyone on the network");
     eprintln!("         can see who you are talking to, when, and who is online.");
     eprintln!();

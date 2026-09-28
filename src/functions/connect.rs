@@ -27,7 +27,7 @@ pub async fn connect(
         {
             "Too many connection attempts. Please wait a moment and try again.".to_string()
         }
-        _ => format!("Could not reach the Nexo server at {}", config.server),
+        _ => "Could not reach the Nexo server. Check the address with `nexo server`.".to_string(),
     })?;
 
     let ServerMessage::Challenge { challenge } = next_message(&mut connection).await? else {
@@ -64,7 +64,7 @@ fn websocket_url(server: &str) -> Result<String, Box<dyn Error>> {
     } else if let Some(rest) = server.strip_prefix("https://") {
         Ok(format!("wss://{rest}/ws"))
     } else {
-        Err("Server address in config.toml must start with http:// or https://".into())
+        Err("The server address must start with http:// or https:// (see `nexo server`)".into())
     }
 }
 

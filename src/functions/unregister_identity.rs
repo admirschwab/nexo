@@ -31,13 +31,13 @@ pub async fn unregister_identity(
         })
         .send()
         .await
-        .map_err(|_| format!("Could not reach the Nexo server at {}", config.server))?;
+        .map_err(|_| "Could not reach the Nexo server. Check the address with `nexo server`.".to_string())?;
 
     match response.status() {
         status if status.is_success() => Ok(()),
         StatusCode::NOT_FOUND => Err(
             "This identity is not registered on the server. Nothing was deleted. \
-             Check the server address in config.toml."
+             Check the server address with `nexo server`."
                 .into(),
         ),
         StatusCode::TOO_MANY_REQUESTS => {

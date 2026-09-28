@@ -1,5 +1,5 @@
 use crate::models::encrypted_identity::{
-    EncryptedIdentity, IdentityFormat, KdfParams, MAGIC_V1, MAGIC_V2,
+    EncryptedIdentity, IdentityFormat, KdfParams, MAGIC_V1, MAGIC_V2, MAGIC_V3,
 };
 use std::fs;
 use std::path::Path;
@@ -15,8 +15,10 @@ pub fn load_identity(
 ) -> Result<EncryptedIdentity, Box<dyn std::error::Error>> {
     let data = fs::read(path)?;
 
-    if data.starts_with(MAGIC_V2) {
-        parse_v2(&data[MAGIC_V2.len()..])
+    if data.starts_with(MAGIC_V3) {
+        parse_with_header(&data[MAGIC_V3.len()..], IdentityFormat::V3)
+    } else if data.starts_with(MAGIC_V2) {
+        parse_with_header(&data[MAGIC_V2.len()..], IdentityFormat::V2)
     } else if data.starts_with(MAGIC_V1) {
         parse_v1(&data[MAGIC_V1.len()..])
     } else {
@@ -24,7 +26,11 @@ pub fn load_identity(
     }
 }
 
-fn parse_v2(data: &[u8]) -> Result<EncryptedIdentity, Box<dyn std::error::Error>> {
+// Format 2 und 3 haben denselben Kopf
+fn parse_with_header(
+    data: &[u8],
+    format: IdentityFormat,
+) -> Result<EncryptedIdentity, Box<dyn std::error::Error>> {
     // 3 × u32 + Salt + Nonce
     if data.len() < 12 + 16 + 24 + 1 {
         return Err("Identity file is corrupted".into());
@@ -54,7 +60,7 @@ fn parse_v2(data: &[u8]) -> Result<EncryptedIdentity, Box<dyn std::error::Error>
     nonce.copy_from_slice(&data[28..52]);
 
     Ok(EncryptedIdentity {
-        format: IdentityFormat::V2,
+        format,
         kdf,
         salt,
         nonce,

@@ -39,7 +39,7 @@ pub async fn register_identity(
         })
         .send()
         .await
-        .map_err(|_| format!("Could not reach the Nexo server at {}", config.server))?;
+        .map_err(|_| "Could not reach the Nexo server. Check the server address and try again.".to_string())?;
 
     match response.status() {
         status if status.is_success() => Ok(()),

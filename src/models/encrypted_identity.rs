@@ -1,18 +1,23 @@
 // Inhalt von identity.nexo
 //
-// Format 2 (aktuell):
-//   "NEXO2" | Argon2-Speicher in KiB (u32) | Durchläufe (u32) | Threads (u32)
+// Format 3 (aktuell):
+//   "NEXO3" | Argon2-Speicher in KiB (u32) | Durchläufe (u32) | Threads (u32)
 //   | Salt (16 Bytes) | Nonce (24 Bytes) | Ciphertext
-// Verschlüsselt sind privater Schlüssel (32 Bytes) + Nickname. Ohne Passwort
-// verrät die Datei also nicht, wem sie gehört. Der Kopf wird als "associated data"
-// mitgeprüft und kann nicht unbemerkt verändert werden.
+// Verschlüsselt sind: privater Schlüssel (32 Bytes) | Länge des Nicknames (u16)
+//   | Nickname | Server-Adresse
+// Ohne Passwort verrät die Datei also weder, wem sie gehört, noch welchen Server
+// man nutzt. Der Kopf wird als "associated data" mitgeprüft und kann nicht
+// unbemerkt verändert werden.
 //
-// Format 1 (alt, wird nur noch gelesen und beim Login umgewandelt):
-//   "NEXO1" | Länge des Nicknames (u16) | Nickname im Klartext
-//   | Salt (16 Bytes) | Nonce (24 Bytes) | Ciphertext des privaten Schlüssels
+// Ältere Formate werden nur noch gelesen und beim Login in Format 3 umgewandelt:
+// Format 2: wie Format 3, verschlüsselt sind nur privater Schlüssel + Nickname
+//           (die Server-Adresse stand im Klartext in config.toml)
+// Format 1: "NEXO1" | Länge des Nicknames (u16) | Nickname im Klartext
+//           | Salt (16 Bytes) | Nonce (24 Bytes) | Ciphertext des privaten Schlüssels
 
 pub const MAGIC_V1: &[u8] = b"NEXO1";
 pub const MAGIC_V2: &[u8] = b"NEXO2";
+pub const MAGIC_V3: &[u8] = b"NEXO3";
 
 // Parameter, mit denen aus dem Passwort der Dateischlüssel abgeleitet wird (Argon2id).
 // Sie stehen in der Datei, damit sie sich später ändern lassen, ohne alte Dateien
@@ -43,6 +48,13 @@ impl KdfParams {
 pub enum IdentityFormat {
     V1 { nickname: String },
     V2,
+    V3,
+}
+
+impl IdentityFormat {
+    pub fn is_current(&self) -> bool {
+        matches!(self, IdentityFormat::V3)
+    }
 }
 
 pub struct EncryptedIdentity {
@@ -54,10 +66,10 @@ pub struct EncryptedIdentity {
 }
 
 impl EncryptedIdentity {
-    // Dateikopf von Format 2, zugleich die "associated data" der Verschlüsselung
-    pub fn header_v2(kdf: &KdfParams, salt: &[u8; 16], nonce: &[u8; 24]) -> Vec<u8> {
+    // Dateikopf ab Format 2, zugleich die "associated data" der Verschlüsselung
+    pub fn header(magic: &[u8], kdf: &KdfParams, salt: &[u8; 16], nonce: &[u8; 24]) -> Vec<u8> {
         [
-            MAGIC_V2,
+            magic,
             &kdf.memory_kib.to_le_bytes(),
             &kdf.iterations.to_le_bytes(),
             &kdf.parallelism.to_le_bytes(),

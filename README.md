@@ -33,9 +33,17 @@ Nexo is designed to keep messaging **simple, private, and minimal**.
 * CLI-based interface
 * Written in Rust
 
+## Commands
+
+* `nexo register` — create a new identity and register it on a server
+* `nexo login` — log in and chat
+* `nexo passwd` — change your password
+* `nexo server` — show the server address, `nexo server <url>` changes it
+* `nexo unregister` — permanently delete your identity from the server and this computer
+
 ## Files
 
-Nexo keeps its files in one folder, so `nexo` works from any directory:
+Nexo keeps its data in one folder, so `nexo` works from any directory:
 
 * Windows: `%LOCALAPPDATA%\nexo`
 * Linux: `~/.local/share/nexo`
@@ -43,10 +51,7 @@ Nexo keeps its files in one folder, so `nexo` works from any directory:
 
 The local folder is used on purpose (not the roaming `%APPDATA%`), so your identity is never synced to other machines or servers.
 
-It contains only two files:
-
-* `identity.nexo` — your private key and nickname, encrypted with your password
-* `config.toml` — the server address (created on first start)
+It contains a single file, `identity.nexo`: your private key, nickname and server address, all encrypted with your password. Without the password, the file does not reveal who you are or which server you use.
 
 ## Architecture
 

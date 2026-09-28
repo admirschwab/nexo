@@ -5,6 +5,7 @@ use getrandom::{rand_core::UnwrapErr, SysRng};
 
 pub fn create_identity(
     nickname: String,
+    server: String,
     password: &str,
 ) -> Result<(Identity, EncryptedIdentity), Box<dyn std::error::Error>> {
     let mut rng = UnwrapErr(SysRng);
@@ -12,6 +13,7 @@ pub fn create_identity(
     let identity = Identity {
         nickname,
         signing_key: SigningKey::generate(&mut rng),
+        server,
     };
 
     let encrypted = encrypt_identity(&identity, password)?;

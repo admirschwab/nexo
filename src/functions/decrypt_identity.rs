@@ -1,6 +1,6 @@
 use crate::functions::derive_file_key::derive_file_key;
 use crate::models::{
-    encrypted_identity::{EncryptedIdentity, IdentityFormat},
+    encrypted_identity::{EncryptedIdentity, IdentityFormat, MAGIC_V2, MAGIC_V3},
     identity::Identity,
 };
 use chacha20poly1305::{
@@ -24,7 +24,10 @@ pub fn decrypt_identity(
     let aad = match encrypted.format {
         IdentityFormat::V1 { .. } => Vec::new(),
         IdentityFormat::V2 => {
-            EncryptedIdentity::header_v2(&encrypted.kdf, &encrypted.salt, &encrypted.nonce)
+            EncryptedIdentity::header(MAGIC_V2, &encrypted.kdf, &encrypted.salt, &encrypted.nonce)
+        }
+        IdentityFormat::V3 => {
+            EncryptedIdentity::header(MAGIC_V3, &encrypted.kdf, &encrypted.salt, &encrypted.nonce)
         }
     };
 
@@ -40,7 +43,7 @@ pub fn decrypt_identity(
         return Err("Invalid private key length".into());
     }
 
-    let (key_bytes, nickname_bytes) = plaintext.split_at(32);
+    let (key_bytes, rest) = plaintext.split_at(32);
 
     let private_key: Zeroizing<[u8; 32]> = Zeroizing::new(
         key_bytes
@@ -48,19 +51,39 @@ pub fn decrypt_identity(
             .map_err(|_| "Invalid private key length")?,
     );
 
-    let nickname = match &encrypted.format {
+    let (nickname, server) = match &encrypted.format {
         IdentityFormat::V1 { nickname } => {
-            if !nickname_bytes.is_empty() {
+            if !rest.is_empty() {
                 return Err("Invalid private key length".into());
             }
 
-            nickname.clone()
+            (nickname.clone(), String::new())
         }
-        IdentityFormat::V2 => String::from_utf8(nickname_bytes.to_vec())?,
+        IdentityFormat::V2 => (String::from_utf8(rest.to_vec())?, String::new()),
+        IdentityFormat::V3 => {
+            if rest.len() < 2 {
+                return Err("Identity file is corrupted".into());
+            }
+
+            let nickname_length = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+            let rest = &rest[2..];
+
+            if rest.len() < nickname_length {
+                return Err("Identity file is corrupted".into());
+            }
+
+            let (nickname, server) = rest.split_at(nickname_length);
+
+            (
+                String::from_utf8(nickname.to_vec())?,
+                String::from_utf8(server.to_vec())?,
+            )
+        }
     };
 
     Ok(Identity {
         nickname,
         signing_key: SigningKey::from_bytes(&private_key),
+        server,
     })
 }
