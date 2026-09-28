@@ -1,5 +1,5 @@
 use crate::chat::{
-    crypto::HandshakeRole,
+    crypto::{safety_number, HandshakeRole},
     session::{HandshakeTimeout, ReceivedText, Session},
 };
 use crate::models::{
@@ -49,6 +49,8 @@ pub struct Conversation {
     pub lines: Vec<ChatLine>,
     pub unread: usize,
     pub session: Session,
+    // Aus beiden Public Keys berechnet, zum Vergleichen am Telefon oder persönlich
+    pub safety_number: String,
 }
 
 impl Conversation {
@@ -302,7 +304,15 @@ impl App {
                 &nonce,
                 &ciphertext,
             ) {
-                ReceivedText::Text(text) => {
+                ReceivedText::Text { text, lost } => {
+                    // Der Server hat Nachrichten verworfen oder nicht zugestellt
+                    if lost > 0 {
+                        conversation.system(format!(
+                            "{lost} message(s) from {} got lost on the way",
+                            conversation.nickname
+                        ));
+                    }
+
                     conversation.push(LineKind::Peer, text);
 
                     if !viewing {
@@ -443,6 +453,8 @@ impl App {
                 continue;
             };
 
+            let safety_number = safety_number(&self.signing_key.verifying_key(), &verifying_key);
+
             self.conversations.push(Conversation {
                 nickname: user.nickname,
                 public_key: user.public_key,
@@ -452,6 +464,7 @@ impl App {
                 lines: Vec::new(),
                 unread: 0,
                 session: Session::None,
+                safety_number,
             });
         }
 

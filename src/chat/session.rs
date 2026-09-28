@@ -5,7 +5,6 @@ use super::crypto::{
 use crate::models::peer_message::PeerMessage;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use std::{
-    collections::HashSet,
     error::Error,
     mem,
     time::{Duration, Instant},
@@ -36,13 +35,17 @@ pub enum Session {
     // Chat-Schlüssel steht (wird beim Verwerfen mit Nullen überschrieben)
     Established {
         key: Zeroizing<[u8; 32]>,
-        // Schutz gegen erneut eingespielte Nachrichten
-        seen_nonces: HashSet<[u8; 24]>,
+        // Nummer der zuletzt gesendeten Nachricht
+        sent: u64,
+        // Nummer der zuletzt empfangenen Nachricht. Kleinere oder gleiche Nummern
+        // sind erneut eingespielt und werden abgelehnt, Lücken sind verlorene Nachrichten.
+        received: u64,
     },
 }
 
 pub enum ReceivedText {
-    Text(String),
+    // `lost`: So viele Nachrichten davor sind unterwegs verloren gegangen
+    Text { text: String, lost: u64 },
     // Wir hatten keine Sitzung (z. B. nach Neustart). Ein neuer Handshake wurde erzeugt.
     NoSession(Vec<PeerMessage>),
     Invalid,
@@ -84,8 +87,9 @@ impl Session {
         text: Zeroizing<String>,
     ) -> Result<Vec<PeerMessage>, Box<dyn Error>> {
         match self {
-            Session::Established { key, .. } => {
-                Ok(vec![encrypt(key, &me.verifying_key(), peer, &text)?])
+            Session::Established { key, sent, .. } => {
+                *sent += 1;
+                Ok(vec![encrypt(key, &me.verifying_key(), peer, *sent, &text)?])
             }
             Session::Pending { queued, .. } => {
                 queued.push(text);
@@ -173,7 +177,8 @@ impl Session {
 
                         *self = Session::Established {
                             key,
-                            seen_nonces: HashSet::new(),
+                            sent: 0,
+                            received: 0,
                         };
 
                         Ok(vec![reply])
@@ -219,7 +224,7 @@ impl Session {
         ciphertext: &str,
     ) -> ReceivedText {
         match self {
-            Session::Established { key, seen_nonces } => {
+            Session::Established { key, received, .. } => {
                 let Some(nonce) = hex::decode(nonce)
                     .ok()
                     .and_then(|bytes| <[u8; 24]>::try_from(bytes).ok())
@@ -231,17 +236,21 @@ impl Session {
                     return ReceivedText::Invalid;
                 };
 
-                if seen_nonces.contains(&nonce) {
+                let Some((counter, text)) =
+                    decrypt_text(key, peer, &me.verifying_key(), &nonce, &ciphertext)
+                else {
+                    return ReceivedText::Invalid;
+                };
+
+                // Schon gesehen (erneut eingespielt) oder zu alt (vertauschte Reihenfolge)
+                if counter <= *received {
                     return ReceivedText::Invalid;
                 }
 
-                match decrypt_text(key, peer, &me.verifying_key(), &nonce, &ciphertext) {
-                    Some(text) => {
-                        seen_nonces.insert(nonce);
-                        ReceivedText::Text(text)
-                    }
-                    None => ReceivedText::Invalid,
-                }
+                let lost = counter - *received - 1;
+                *received = counter;
+
+                ReceivedText::Text { text, lost }
             }
             // Der Partner hält noch eine alte Sitzung: neu aushandeln
             Session::None => match self.start_handshake(me, peer, Vec::new(), 1) {
@@ -286,12 +295,14 @@ impl Session {
 
         let messages = queued
             .iter()
-            .map(|text| encrypt(&key, &me.verifying_key(), peer, text))
+            .zip(1..)
+            .map(|(text, counter)| encrypt(&key, &me.verifying_key(), peer, counter, text))
             .collect::<Result<Vec<_>, _>>()?;
 
         *self = Session::Established {
             key,
-            seen_nonces: HashSet::new(),
+            sent: messages.len() as u64,
+            received: 0,
         };
 
         Ok(messages)
@@ -327,9 +338,10 @@ fn encrypt(
     key: &[u8; 32],
     me: &VerifyingKey,
     peer: &VerifyingKey,
+    counter: u64,
     text: &str,
 ) -> Result<PeerMessage, Box<dyn Error>> {
-    let (nonce, ciphertext) = encrypt_text(key, me, peer, text)?;
+    let (nonce, ciphertext) = encrypt_text(key, me, peer, counter, text)?;
 
     Ok(PeerMessage::Text {
         nonce: hex::encode(nonce),

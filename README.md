@@ -21,6 +21,8 @@ Nexo is designed to keep messaging **simple, private, and minimal**.
 ## Features
 
 * End-to-end encrypted messaging
+* Safety numbers: compare a 60-digit number with your contact (by phone or in person) to make sure nobody, not even the server, is in between
+* Lost, replayed or reordered messages are detected
 * Local encrypted private key
 * Public-key-based identity
 * Privacy-focused server architecture

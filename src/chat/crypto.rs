@@ -4,14 +4,15 @@ use chacha20poly1305::{
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 // Kontexte, damit Signaturen und Schlüssel nie für etwas anderes verwendet werden können
 const HANDSHAKE_INIT_CONTEXT: &[u8] = b"nexo-handshake-init-v1";
 const HANDSHAKE_REPLY_CONTEXT: &[u8] = b"nexo-handshake-reply-v2";
-const CHAT_KEY_INFO: &[u8] = b"nexo-chat-key-v1";
+const CHAT_KEY_INFO: &[u8] = b"nexo-chat-key-v2";
+const SAFETY_NUMBER_CONTEXT: &[u8] = b"nexo-safety-number-v1";
 
 pub fn generate_ephemeral_secret() -> Result<StaticSecret, getrandom::Error> {
     let mut bytes = [0u8; 32];
@@ -157,10 +158,15 @@ fn unpad(padded: &[u8]) -> Option<&[u8]> {
     (padded[end] == 0x80).then(|| &padded[..end])
 }
 
+// Verschlüsselt wird: Nachrichtennummer (8 Bytes) + Text, aufgefüllt.
+// Die Nummer steht im verschlüsselten Teil, der Server sieht sie nicht.
+// Die Nonce bleibt trotzdem zufällig: Beide Richtungen verwenden denselben
+// Schlüssel, eine Nonce aus dem Zähler käme also in beiden Richtungen doppelt vor.
 pub fn encrypt_text(
     key: &[u8; 32],
     from: &VerifyingKey,
     to: &VerifyingKey,
+    counter: u64,
     text: &str,
 ) -> Result<([u8; 24], Vec<u8>), Box<dyn std::error::Error>> {
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice())?;
@@ -168,7 +174,8 @@ pub fn encrypt_text(
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut nonce)?;
 
-    let padded = pad(text.as_bytes());
+    let plaintext = Zeroizing::new([counter.to_le_bytes().as_slice(), text.as_bytes()].concat());
+    let padded = pad(&plaintext);
 
     let ciphertext = cipher.encrypt(
         &XNonce::try_from(nonce.as_slice())?,
@@ -187,7 +194,7 @@ pub fn decrypt_text(
     to: &VerifyingKey,
     nonce: &[u8; 24],
     ciphertext: &[u8],
-) -> Option<String> {
+) -> Option<(u64, String)> {
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice()).ok()?;
 
     let padded = Zeroizing::new(
@@ -202,5 +209,41 @@ pub fn decrypt_text(
             .ok()?,
     );
 
-    String::from_utf8(unpad(&padded)?.to_vec()).ok()
+    let plaintext = unpad(&padded)?;
+
+    if plaintext.len() < 8 {
+        return None;
+    }
+
+    let (counter, text) = plaintext.split_at(8);
+    let counter = u64::from_le_bytes(counter.try_into().ok()?);
+
+    Some((counter, String::from_utf8(text.to_vec()).ok()?))
+}
+
+// Sicherheitsnummer: 60 Ziffern, berechnet aus beiden Public Keys.
+// Die Schlüssel werden sortiert, damit beide Seiten dieselbe Zahl sehen.
+// Stimmt sie bei beiden überein (verglichen z. B. am Telefon), hat niemand,
+// auch nicht der Server, einen Schlüssel ausgetauscht.
+// Es wird nichts gespeichert, die Zahl wird jedes Mal neu berechnet.
+pub fn safety_number(a: &VerifyingKey, b: &VerifyingKey) -> String {
+    let (first, second) = if a.as_bytes() < b.as_bytes() { (a, b) } else { (b, a) };
+
+    let hash = Sha512::new()
+        .chain_update(SAFETY_NUMBER_CONTEXT)
+        .chain_update(first.as_bytes())
+        .chain_update(second.as_bytes())
+        .finalize();
+
+    // 12 Blöcke aus je 5 Bytes, jeweils als fünfstellige Zahl
+    hash.chunks_exact(5)
+        .take(12)
+        .map(|chunk| {
+            let mut bytes = [0u8; 8];
+            bytes[..5].copy_from_slice(chunk);
+
+            format!("{:05}", u64::from_le_bytes(bytes) % 100_000)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

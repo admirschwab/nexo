@@ -112,13 +112,13 @@ fn render_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: Rect) {
     let [info_area, messages_area, input_area] = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(5),
         Constraint::Min(3),
         Constraint::Length(3),
     ])
         .areas(area);
 
-    // Kopf: mit wem, Fingerprint, Zustand der Verschlüsselung
+    // Kopf: mit wem, Sicherheitsnummer, Zustand der Verschlüsselung
     let state = if !conversation.online {
         "offline".red()
     } else if conversation.session.is_established() {
@@ -130,11 +130,17 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
     };
 
     let info = Paragraph::new(vec![
+        // 12 Blöcke, auf zwei Zeilen verteilt
         Line::from(vec![
-            "Fingerprint: ".dark_gray(),
-            fingerprint(&conversation.public_key).into(),
+            "Safety number: ".dark_gray(),
+            conversation.safety_number[..35].to_string().into(),
         ]),
-        Line::from(vec!["Status:      ".dark_gray(), state]),
+        Line::from(vec![
+            "               ".into(),
+            conversation.safety_number[36..].to_string().into(),
+            "   compare by phone or in person".dark_gray(),
+        ]),
+        Line::from(vec!["Status:        ".dark_gray(), state]),
     ])
         .block(Block::bordered().title(format!(" Chat with {} ", conversation.nickname).bold()));
 
@@ -245,13 +251,3 @@ fn short_key(public_key: &str) -> String {
     )
 }
 
-// Voller Public Key in Vierergruppen, zum Vergleichen über einen anderen Weg
-fn fingerprint(public_key: &str) -> String {
-    public_key
-        .to_uppercase()
-        .as_bytes()
-        .chunks(4)
-        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
