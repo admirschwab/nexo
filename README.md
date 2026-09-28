@@ -27,8 +27,24 @@ Nexo is designed to keep messaging **simple, private, and minimal**.
 * No server-side message storage
 * No chat history
 * Online-only messaging
+* Delete your account at any time with `nexo unregister`: the server forgets your public key and nickname
 * CLI-based interface
 * Written in Rust
+
+## Files
+
+Nexo keeps its files in one folder, so `nexo` works from any directory:
+
+* Windows: `%LOCALAPPDATA%\nexo`
+* Linux: `~/.local/share/nexo`
+* macOS: `~/Library/Application Support/nexo`
+
+The local folder is used on purpose (not the roaming `%APPDATA%`), so your identity is never synced to other machines or servers.
+
+It contains only two files:
+
+* `identity.nexo` — your private key and nickname, encrypted with your password
+* `config.toml` — the server address (created on first start)
 
 ## Architecture
 

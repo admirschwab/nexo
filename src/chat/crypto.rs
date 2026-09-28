@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 // Kontexte, damit Signaturen und Schlüssel nie für etwas anderes verwendet werden können
 const HANDSHAKE_INIT_CONTEXT: &[u8] = b"nexo-handshake-init-v1";
-const HANDSHAKE_REPLY_CONTEXT: &[u8] = b"nexo-handshake-reply-v1";
+const HANDSHAKE_REPLY_CONTEXT: &[u8] = b"nexo-handshake-reply-v2";
 const CHAT_KEY_INFO: &[u8] = b"nexo-chat-key-v1";
 
 pub fn generate_ephemeral_secret() -> Result<StaticSecret, getrandom::Error> {
@@ -30,11 +30,15 @@ pub enum HandshakeRole {
 // Signiert wird: Kontext (je nach Rolle) + eigener X25519-Key + Absender + Empfänger.
 // So kann ein Handshake nicht an einen anderen Empfänger umgeleitet
 // und eine Antwort nicht als Beginn ausgegeben werden (oder umgekehrt).
+// Eine Antwort signiert zusätzlich den X25519-Key des Handshakes, auf den sie
+// antwortet. Eine veraltete Antwort (auf einen früheren Versuch) passt dann
+// nicht mehr und kann keine Sitzung mit falschem Schlüssel erzeugen.
 fn handshake_transcript(
     role: HandshakeRole,
     ephemeral_key: &[u8; 32],
     from: &VerifyingKey,
     to: &VerifyingKey,
+    in_reply_to: Option<&[u8; 32]>,
 ) -> Vec<u8> {
     let context = match role {
         HandshakeRole::Init => HANDSHAKE_INIT_CONTEXT,
@@ -46,6 +50,7 @@ fn handshake_transcript(
         ephemeral_key.as_slice(),
         from.as_bytes().as_slice(),
         to.as_bytes().as_slice(),
+        in_reply_to.map_or(&[][..], |key| key.as_slice()),
     ]
         .concat()
 }
@@ -55,12 +60,14 @@ pub fn sign_handshake(
     signing_key: &SigningKey,
     ephemeral_key: &PublicKey,
     to: &VerifyingKey,
+    in_reply_to: Option<&[u8; 32]>,
 ) -> Signature {
     signing_key.sign(&handshake_transcript(
         role,
         ephemeral_key.as_bytes(),
         &signing_key.verifying_key(),
         to,
+        in_reply_to,
     ))
 }
 
@@ -70,8 +77,12 @@ pub fn verify_handshake(
     to: &VerifyingKey,
     ephemeral_key: &[u8; 32],
     signature: &Signature,
+    in_reply_to: Option<&[u8; 32]>,
 ) -> bool {
-    from.verify(&handshake_transcript(role, ephemeral_key, from, to), signature)
+    from.verify(
+        &handshake_transcript(role, ephemeral_key, from, to, in_reply_to),
+        signature,
+    )
         .is_ok()
 }
 
@@ -114,6 +125,38 @@ fn associated_data(from: &VerifyingKey, to: &VerifyingKey) -> Vec<u8> {
     [from.as_bytes().as_slice(), to.as_bytes().as_slice()].concat()
 }
 
+// Nachrichten werden vor dem Verschlüsseln auf eine dieser Größen aufgefüllt.
+// Sonst verrät die Länge des Ciphertexts, wie lang der Text ist.
+// Größere Nachrichten werden auf ein Vielfaches der letzten Stufe aufgefüllt.
+const PADDING_BUCKETS: [usize; 3] = [256, 1024, 4096];
+
+// Text + 0x80 + Nullen bis zur nächsten Stufe (ISO/IEC 7816-4).
+// Das 0x80 markiert, wo der Text endet.
+fn pad(text: &[u8]) -> Zeroizing<Vec<u8>> {
+    let needed = text.len() + 1;
+    let largest = PADDING_BUCKETS[PADDING_BUCKETS.len() - 1];
+
+    let padded_length = PADDING_BUCKETS
+        .iter()
+        .copied()
+        .find(|&bucket| bucket >= needed)
+        .unwrap_or_else(|| needed.div_ceil(largest) * largest);
+
+    let mut padded = Zeroizing::new(Vec::with_capacity(padded_length));
+    padded.extend_from_slice(text);
+    padded.push(0x80);
+    padded.resize(padded_length, 0);
+
+    padded
+}
+
+// Entfernt Nullen und das 0x80 am Ende
+fn unpad(padded: &[u8]) -> Option<&[u8]> {
+    let end = padded.iter().rposition(|&byte| byte != 0)?;
+
+    (padded[end] == 0x80).then(|| &padded[..end])
+}
+
 pub fn encrypt_text(
     key: &[u8; 32],
     from: &VerifyingKey,
@@ -125,10 +168,12 @@ pub fn encrypt_text(
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut nonce)?;
 
+    let padded = pad(text.as_bytes());
+
     let ciphertext = cipher.encrypt(
         &XNonce::try_from(nonce.as_slice())?,
         Payload {
-            msg: text.as_bytes(),
+            msg: &padded,
             aad: &associated_data(from, to),
         },
     )?;
@@ -145,15 +190,17 @@ pub fn decrypt_text(
 ) -> Option<String> {
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice()).ok()?;
 
-    let plaintext = cipher
-        .decrypt(
-            &XNonce::try_from(nonce.as_slice()).ok()?,
-            Payload {
-                msg: ciphertext,
-                aad: &associated_data(from, to),
-            },
-        )
-        .ok()?;
+    let padded = Zeroizing::new(
+        cipher
+            .decrypt(
+                &XNonce::try_from(nonce.as_slice()).ok()?,
+                Payload {
+                    msg: ciphertext,
+                    aad: &associated_data(from, to),
+                },
+            )
+            .ok()?,
+    );
 
-    String::from_utf8(plaintext).ok()
+    String::from_utf8(unpad(&padded)?.to_vec()).ok()
 }

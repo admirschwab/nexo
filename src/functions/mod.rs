@@ -1,8 +1,10 @@
-pub mod decrypt_private_key;
-pub mod encrypt_private_key;
-pub mod load_identity;
-pub mod save_identity;
-pub mod create_identity;
-pub mod register_identity;
 pub mod connect;
+pub mod create_identity;
+pub mod decrypt_identity;
+pub mod derive_file_key;
+pub mod encrypt_identity;
+pub mod load_identity;
+pub mod register_identity;
+pub mod save_identity;
+pub mod unregister_identity;
 pub mod validate_nickname;

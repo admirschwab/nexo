@@ -1,7 +1,6 @@
 mod app;
 mod render;
 
-use crate::chat::known_peers::KnownPeers;
 use crate::functions::connect::Connection;
 use crate::models::protocol::ServerMessage;
 use app::App;
@@ -10,12 +9,15 @@ use futures_util::{SinkExt, StreamExt};
 use ratatui::crossterm::event::{Event, EventStream, KeyEventKind};
 use render::render;
 use std::{error::Error, mem, time::Duration};
-use tokio::time::{sleep_until, Instant};
+use tokio::time::{interval, sleep_until, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
 
 // Der Server schickt alle 20 Sekunden ein Ping. Kommt so lange gar nichts,
 // ist die Verbindung tot (z. B. WLAN weg), auch wenn TCP das noch nicht bemerkt hat.
 const SERVER_TIMEOUT: Duration = Duration::from_secs(60);
+
+// So oft wird geprüft, ob ein Handshake unbeantwortet geblieben ist
+const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 // Startet das Vollbild-Overlay nach dem Login.
 // Läuft, bis der Nutzer es beendet; danach wird die Verbindung geschlossen
@@ -24,14 +26,16 @@ pub async fn run_overlay(
     connection: Connection,
     nickname: String,
     signing_key: SigningKey,
-    known_peers: KnownPeers,
     server: String,
 ) -> Result<(), Box<dyn Error>> {
     let (mut ws_sender, mut ws_receiver) = connection.split();
 
-    let mut app = App::new(nickname, signing_key, known_peers, server);
+    let mut app = App::new(nickname, signing_key, server);
     let mut events = EventStream::new();
     let mut last_seen = Instant::now();
+
+    let mut ticker = interval(TICK_INTERVAL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     // Stellt das Terminal auch bei einem Panic wieder her
     let mut terminal = ratatui::init();
@@ -70,6 +74,8 @@ pub async fn run_overlay(
             _ = sleep_until(last_seen + SERVER_TIMEOUT), if app.connected => {
                 app.disconnected();
             },
+
+            _ = ticker.tick() => app.tick(),
         }
 
         // Alles verschicken, was beim Verarbeiten angefallen ist

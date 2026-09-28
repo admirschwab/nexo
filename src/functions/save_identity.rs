@@ -1,29 +1,23 @@
-use crate::models::identity::Identity;
+use crate::models::encrypted_identity::{EncryptedIdentity, IdentityFormat};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
-// Schreibt die Identität in eine neue Datei. Eine vorhandene Datei wird nie
-// überschrieben, damit kein Schlüssel versehentlich verloren geht.
+// Schreibt die Identität in eine neue Datei (immer Format 2). Eine vorhandene
+// Datei wird nie überschrieben, damit kein Schlüssel versehentlich verloren geht.
 pub fn save_identity(
     path: &Path,
-    identity: &Identity,
+    identity: &EncryptedIdentity,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut data = Vec::new();
+    if !matches!(identity.format, IdentityFormat::V2) {
+        return Err("Only the current identity file format can be saved".into());
+    }
 
-    data.extend_from_slice(b"NEXO1");
-
-    // Nickname
-    let nickname_bytes = identity.nickname.as_bytes();
-    let nickname_length = nickname_bytes.len() as u16;
-
-    data.extend_from_slice(&nickname_length.to_le_bytes());
-    data.extend_from_slice(nickname_bytes);
-
-    // Encrypted private key
-    data.extend_from_slice(&identity.encrypted_private_key.salt);
-    data.extend_from_slice(&identity.encrypted_private_key.nonce);
-    data.extend_from_slice(&identity.encrypted_private_key.ciphertext);
+    let data = [
+        EncryptedIdentity::header_v2(&identity.kdf, &identity.salt, &identity.nonce),
+        identity.ciphertext.clone(),
+    ]
+        .concat();
 
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);

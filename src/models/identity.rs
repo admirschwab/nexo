@@ -1,6 +1,8 @@
-use super::encrypted_private_key::EncryptedPrivateKey;
+use ed25519_dalek::SigningKey;
 
+// Entschlüsselte Identität, nur im Arbeitsspeicher.
+// SigningKey überschreibt sich beim Freigeben selbst mit Nullen.
 pub struct Identity {
     pub nickname: String,
-    pub encrypted_private_key: EncryptedPrivateKey,
+    pub signing_key: SigningKey,
 }

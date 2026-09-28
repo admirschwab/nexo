@@ -41,3 +41,6 @@ pub const AUTH_CONTEXT: &[u8] = b"nexo-auth-v1";
 // Kontext für die Signatur bei der Registrierung (Kontext + Public Key + Nickname).
 // Damit beweisen wir dem Server, dass wir den privaten Schlüssel besitzen.
 pub const REGISTER_CONTEXT: &[u8] = b"nexo-register-v1";
+
+// Kontext für die Signatur beim Löschen des Kontos (Kontext + Public Key)
+pub const UNREGISTER_CONTEXT: &[u8] = b"nexo-unregister-v1";

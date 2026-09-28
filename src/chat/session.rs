@@ -4,18 +4,34 @@ use super::crypto::{
 };
 use crate::models::peer_message::PeerMessage;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use std::{collections::HashSet, error::Error, mem};
+use std::{
+    collections::HashSet,
+    error::Error,
+    mem,
+    time::{Duration, Instant},
+};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
+
+// So lange warten wir auf die Antwort auf einen Handshake, bevor wir ihn neu schicken.
+// Die Antwort kann unterwegs verloren gehen, z. B. wenn der Server sie wegen des
+// Rate-Limits verwirft. Ohne neuen Versuch würden die Nachrichten ewig warten.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Nach so vielen Versuchen ohne Antwort geben wir auf
+const MAX_HANDSHAKE_ATTEMPTS: u32 = 3;
 
 // Verschlüsselte Sitzung mit einem Gesprächspartner
 pub enum Session {
     // Noch kein Schlüsselaustausch
     None,
-    // Handshake gesendet, Antwort steht aus. Nachrichten warten solange.
+    // Handshake gesendet, Antwort steht aus. Nachrichten warten solange
+    // (und werden beim Verwerfen mit Nullen überschrieben).
     Pending {
         secret: StaticSecret,
-        queued: Vec<String>,
+        queued: Vec<Zeroizing<String>>,
+        sent_at: Instant,
+        attempts: u32,
     },
     // Chat-Schlüssel steht (wird beim Verwerfen mit Nullen überschrieben)
     Established {
@@ -30,6 +46,17 @@ pub enum ReceivedText {
     // Wir hatten keine Sitzung (z. B. nach Neustart). Ein neuer Handshake wurde erzeugt.
     NoSession(Vec<PeerMessage>),
     Invalid,
+}
+
+// Ergebnis der regelmäßigen Prüfung eines laufenden Handshakes
+pub enum HandshakeTimeout {
+    // Nichts zu tun
+    Waiting,
+    // Keine Antwort: Handshake erneut schicken
+    Retry(Vec<PeerMessage>),
+    // Auch nach mehreren Versuchen keine Antwort. Enthält die Zahl der
+    // wartenden Nachrichten, die damit verloren sind.
+    GaveUp(usize),
 }
 
 impl Session {
@@ -54,7 +81,7 @@ impl Session {
         &mut self,
         me: &SigningKey,
         peer: &VerifyingKey,
-        text: String,
+        text: Zeroizing<String>,
     ) -> Result<Vec<PeerMessage>, Box<dyn Error>> {
         match self {
             Session::Established { key, .. } => {
@@ -64,18 +91,40 @@ impl Session {
                 queued.push(text);
                 Ok(Vec::new())
             }
-            Session::None => {
-                let secret = generate_ephemeral_secret()?;
-                let handshake = handshake_message(HandshakeRole::Init, me, peer, &secret);
-
-                *self = Session::Pending {
-                    secret,
-                    queued: vec![text],
-                };
-
-                Ok(vec![handshake])
-            }
+            Session::None => Ok(vec![self.start_handshake(me, peer, vec![text], 1)?]),
         }
+    }
+
+    // Muss regelmäßig aufgerufen werden, damit ein unbeantworteter Handshake
+    // wiederholt wird
+    pub fn check_timeout(
+        &mut self,
+        me: &SigningKey,
+        peer: &VerifyingKey,
+    ) -> Result<HandshakeTimeout, Box<dyn Error>> {
+        let Session::Pending { sent_at, attempts, .. } = self else {
+            return Ok(HandshakeTimeout::Waiting);
+        };
+
+        if sent_at.elapsed() < HANDSHAKE_TIMEOUT {
+            return Ok(HandshakeTimeout::Waiting);
+        }
+
+        let attempts = *attempts;
+
+        if attempts >= MAX_HANDSHAKE_ATTEMPTS {
+            return Ok(HandshakeTimeout::GaveUp(self.reset()));
+        }
+
+        let Session::Pending { queued, .. } = mem::replace(self, Session::None) else {
+            unreachable!();
+        };
+
+        // Neuer Versuch mit frischem Schlüssel. Eine verspätete Antwort auf den
+        // vorigen Versuch passt dann nicht mehr und wird ignoriert.
+        let handshake = self.start_handshake(me, peer, queued, attempts + 1)?;
+
+        Ok(HandshakeTimeout::Retry(vec![handshake]))
     }
 
     pub fn receive_handshake(
@@ -91,55 +140,73 @@ impl Session {
             .map_err(|_| "Invalid ephemeral key")?;
 
         let signature = Signature::from_slice(&hex::decode(signature)?)?;
-
-        if !verify_handshake(role, peer, &me.verifying_key(), &ephemeral_key, &signature) {
-            return Err("Invalid handshake signature".into());
-        }
-
         let their_key = PublicKey::from(ephemeral_key);
 
-        match (role, mem::replace(self, Session::None)) {
-            // Antwort auf unseren Handshake (oder beide haben gleichzeitig angefangen,
-            // dann ergibt Diffie-Hellman auf beiden Seiten trotzdem denselben Schlüssel)
-            (_, Session::Pending { secret, queued }) => {
-                let key = derive_chat_key(&secret, &their_key)
-                    .ok_or("Invalid ephemeral key")?;
+        match role {
+            HandshakeRole::Init => {
+                if !verify_handshake(role, peer, &me.verifying_key(), &ephemeral_key, &signature, None) {
+                    return Err("Invalid handshake signature".into());
+                }
 
-                let messages = queued
-                    .iter()
-                    .map(|text| encrypt(&key, &me.verifying_key(), peer, text))
-                    .collect::<Result<Vec<_>, _>>()?;
+                match mem::replace(self, Session::None) {
+                    // Beide haben gleichzeitig angefangen: Diffie-Hellman ergibt auf
+                    // beiden Seiten trotzdem denselben Schlüssel, keine Antwort nötig
+                    Session::Pending { secret, queued, .. } => {
+                        self.establish(me, peer, &secret, &their_key, queued)
+                    }
+                    // Der Partner startet eine neue Sitzung: mit eigenem frischem Schlüssel
+                    // antworten. Die Antwort wird selbst nie beantwortet, so können sich
+                    // zwei Clients nicht endlos gegenseitig neu verschlüsseln.
+                    Session::None | Session::Established { .. } => {
+                        let secret = generate_ephemeral_secret()?;
 
-                *self = Session::Established {
-                    key,
-                    seen_nonces: HashSet::new(),
+                        let key = derive_chat_key(&secret, &their_key)
+                            .ok_or("Invalid ephemeral key")?;
+
+                        let reply = handshake_message(
+                            HandshakeRole::Reply,
+                            me,
+                            peer,
+                            &secret,
+                            Some(&ephemeral_key),
+                        );
+
+                        *self = Session::Established {
+                            key,
+                            seen_nonces: HashSet::new(),
+                        };
+
+                        Ok(vec![reply])
+                    }
+                }
+            }
+            HandshakeRole::Reply => {
+                // Nur eine Antwort auf unseren aktuellen Handshake wird angenommen.
+                // Doppelte, erneut eingespielte oder verspätete Antworten (auf einen
+                // früheren Versuch) werden still ignoriert, die Sitzung bleibt, wie sie ist.
+                let Session::Pending { secret, .. } = self else {
+                    return Ok(Vec::new());
                 };
 
-                Ok(messages)
-            }
-            // Der Partner startet eine neue Sitzung: mit eigenem frischem Schlüssel antworten.
-            // Die Antwort ist als Reply markiert und wird selbst nie beantwortet,
-            // so können sich zwei Clients nicht endlos gegenseitig neu verschlüsseln.
-            (HandshakeRole::Init, Session::None | Session::Established { .. }) => {
-                let secret = generate_ephemeral_secret()?;
+                let own_key = PublicKey::from(&*secret);
 
-                let key = derive_chat_key(&secret, &their_key)
-                    .ok_or("Invalid ephemeral key")?;
+                if !verify_handshake(
+                    role,
+                    peer,
+                    &me.verifying_key(),
+                    &ephemeral_key,
+                    &signature,
+                    Some(own_key.as_bytes()),
+                ) {
+                    return Ok(Vec::new());
+                }
 
-                let reply = handshake_message(HandshakeRole::Reply, me, peer, &secret);
-
-                *self = Session::Established {
-                    key,
-                    seen_nonces: HashSet::new(),
+                let Session::Pending { secret, queued, .. } = mem::replace(self, Session::None)
+                else {
+                    unreachable!();
                 };
 
-                Ok(vec![reply])
-            }
-            // Antwort, obwohl wir auf keine warten (z. B. doppelt oder erneut
-            // eingespielt): ignorieren und die bestehende Sitzung behalten
-            (HandshakeRole::Reply, previous) => {
-                *self = previous;
-                Err("Unexpected key exchange reply".into())
+                self.establish(me, peer, &secret, &their_key, queued)
             }
         }
     }
@@ -177,21 +244,57 @@ impl Session {
                 }
             }
             // Der Partner hält noch eine alte Sitzung: neu aushandeln
-            Session::None => match generate_ephemeral_secret() {
-                Ok(secret) => {
-                    let handshake = handshake_message(HandshakeRole::Init, me, peer, &secret);
-
-                    *self = Session::Pending {
-                        secret,
-                        queued: Vec::new(),
-                    };
-
-                    ReceivedText::NoSession(vec![handshake])
-                }
+            Session::None => match self.start_handshake(me, peer, Vec::new(), 1) {
+                Ok(handshake) => ReceivedText::NoSession(vec![handshake]),
                 Err(_) => ReceivedText::Invalid,
             },
             Session::Pending { .. } => ReceivedText::Invalid,
         }
+    }
+
+    // Erzeugt einen frischen Schlüssel, wechselt in Pending und gibt den Handshake zurück
+    fn start_handshake(
+        &mut self,
+        me: &SigningKey,
+        peer: &VerifyingKey,
+        queued: Vec<Zeroizing<String>>,
+        attempts: u32,
+    ) -> Result<PeerMessage, Box<dyn Error>> {
+        let secret = generate_ephemeral_secret()?;
+        let handshake = handshake_message(HandshakeRole::Init, me, peer, &secret, None);
+
+        *self = Session::Pending {
+            secret,
+            queued,
+            sent_at: Instant::now(),
+            attempts,
+        };
+
+        Ok(handshake)
+    }
+
+    // Berechnet den Chat-Schlüssel und verschlüsselt die wartenden Nachrichten
+    fn establish(
+        &mut self,
+        me: &SigningKey,
+        peer: &VerifyingKey,
+        secret: &StaticSecret,
+        their_key: &PublicKey,
+        queued: Vec<Zeroizing<String>>,
+    ) -> Result<Vec<PeerMessage>, Box<dyn Error>> {
+        let key = derive_chat_key(secret, their_key).ok_or("Invalid ephemeral key")?;
+
+        let messages = queued
+            .iter()
+            .map(|text| encrypt(&key, &me.verifying_key(), peer, text))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        *self = Session::Established {
+            key,
+            seen_nonces: HashSet::new(),
+        };
+
+        Ok(messages)
     }
 }
 
@@ -200,9 +303,10 @@ fn handshake_message(
     me: &SigningKey,
     peer: &VerifyingKey,
     secret: &StaticSecret,
+    in_reply_to: Option<&[u8; 32]>,
 ) -> PeerMessage {
     let ephemeral_key = PublicKey::from(secret);
-    let signature = sign_handshake(role, me, &ephemeral_key, peer);
+    let signature = sign_handshake(role, me, &ephemeral_key, peer, in_reply_to);
 
     let ephemeral_key = hex::encode(ephemeral_key.as_bytes());
     let signature = hex::encode(signature.to_bytes());

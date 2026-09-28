@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::models::identity::Identity;
 use crate::models::protocol::REGISTER_CONTEXT;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::Signer;
 use reqwest::{Client, StatusCode};
 use serde::Serialize;
 
@@ -16,9 +16,8 @@ struct RegisterRequest<'a> {
 pub async fn register_identity(
     config: &Config,
     identity: &Identity,
-    signing_key: &SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let public_key = signing_key.verifying_key();
+    let public_key = identity.signing_key.verifying_key();
 
     let signed_message = [
         REGISTER_CONTEXT,
@@ -27,7 +26,7 @@ pub async fn register_identity(
     ]
         .concat();
 
-    let signature = signing_key.sign(&signed_message);
+    let signature = identity.signing_key.sign(&signed_message);
 
     let url = format!("{}/register", config.server);
 

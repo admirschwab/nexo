@@ -1,7 +1,6 @@
 use crate::chat::{
     crypto::HandshakeRole,
-    known_peers::{KnownPeers, PeerTrust},
-    session::{ReceivedText, Session},
+    session::{HandshakeTimeout, ReceivedText, Session},
 };
 use crate::models::{
     peer_message::PeerMessage,
@@ -12,6 +11,7 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     widgets::ListState,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 // Weitere Zeichen werden bei der Eingabe ignoriert
 pub const MAX_INPUT_LENGTH: usize = 1000;
@@ -28,6 +28,13 @@ pub struct ChatLine {
     pub text: String,
 }
 
+// Der Verlauf soll nach dem Beenden nicht im Arbeitsspeicher zurückbleiben
+impl Drop for ChatLine {
+    fn drop(&mut self) {
+        self.text.zeroize();
+    }
+}
+
 // Ein Eintrag in der Liste: ein Nutzer, der online ist, oder ein Chat mit
 // jemandem, der inzwischen offline ist (ausgegraut bis Nexo beendet wird)
 pub struct Conversation {
@@ -41,8 +48,6 @@ pub struct Conversation {
     pub lines: Vec<ChatLine>,
     pub unread: usize,
     pub session: Session,
-    // Passt der Schlüssel zu dem, was wir uns beim ersten Chat gemerkt haben?
-    pub trust: PeerTrust,
 }
 
 impl Conversation {
@@ -72,7 +77,6 @@ pub struct App {
     pub public_key: String,
     pub server: String,
     signing_key: SigningKey,
-    known_peers: KnownPeers,
     pub connected: bool,
     pub conversations: Vec<Conversation>,
     pub list_state: ListState,
@@ -85,23 +89,20 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
-        nickname: String,
-        signing_key: SigningKey,
-        known_peers: KnownPeers,
-        server: String,
-    ) -> Self {
+    pub fn new(nickname: String, signing_key: SigningKey, server: String) -> Self {
         Self {
             nickname,
             public_key: hex::encode(signing_key.verifying_key().to_bytes()),
             server,
             signing_key,
-            known_peers,
             connected: true,
             conversations: Vec::new(),
             list_state: ListState::default(),
             view: View::List,
-            input: String::new(),
+            // Platz für die längste erlaubte Eingabe (bis zu 4 Bytes pro Zeichen).
+            // So wird der Puffer beim Tippen nie umkopiert und es bleiben
+            // keine alten Kopien der Eingabe im Speicher liegen.
+            input: String::with_capacity(MAX_INPUT_LENGTH * 4),
             status: String::new(),
             should_quit: false,
             outgoing: Vec::new(),
@@ -162,7 +163,6 @@ impl App {
                 self.status.clear();
             }
             KeyCode::Enter => self.send_input(),
-            KeyCode::Char('t') if key.modifiers == KeyModifiers::CONTROL => self.accept_key(),
             KeyCode::Backspace => {
                 self.input.pop();
             }
@@ -177,7 +177,7 @@ impl App {
     }
 
     fn send_input(&mut self) {
-        let text = self.input.trim().to_string();
+        let text = Zeroizing::new(self.input.trim().to_string());
 
         if text.is_empty() {
             return;
@@ -201,17 +201,8 @@ impl App {
             return;
         }
 
-        // Möglicher Angriff: nichts schicken, bis der Nutzer den Schlüssel bewusst akzeptiert
-        if conversation.trust.is_warning() {
-            conversation.system(
-                "Sending blocked because the key does not match. Compare the fingerprint \
-                 with your contact another way, then press Ctrl+T to accept the new key."
-                    .to_string(),
-            );
-            return;
-        }
-
-        self.input.clear();
+        // Überschreibt die Eingabe mit Nullen, der Puffer bleibt erhalten
+        self.input.zeroize();
 
         match conversation.session.send_text(
             &self.signing_key,
@@ -219,73 +210,10 @@ impl App {
             text.clone(),
         ) {
             Ok(messages) => {
-                conversation.push(LineKind::Own, text);
+                conversation.push(LineKind::Own, text.to_string());
                 queue(&mut self.outgoing, &conversation.public_key, messages);
-                self.remember_peer(index);
             }
             Err(error) => conversation.system(format!("Could not send message: {error}")),
-        }
-    }
-
-    // Merkt sich den Schlüssel beim ersten Nachrichtenaustausch
-    fn remember_peer(&mut self, index: usize) {
-        let conversation = &mut self.conversations[index];
-
-        if conversation.trust != PeerTrust::New {
-            return;
-        }
-
-        if let Err(error) = self
-            .known_peers
-            .remember(&conversation.nickname, &conversation.public_key)
-        {
-            conversation.system(format!(
-                "Could not save the key of {}: {error}",
-                conversation.nickname
-            ));
-            return;
-        }
-
-        self.refresh_trust();
-    }
-
-    // Akzeptiert einen geänderten Schlüssel für den offenen Chat
-    fn accept_key(&mut self) {
-        let View::Chat(public_key) = &self.view else {
-            return;
-        };
-
-        let Some(index) = self.find(public_key) else {
-            return;
-        };
-
-        let conversation = &mut self.conversations[index];
-
-        if !conversation.trust.is_warning() {
-            return;
-        }
-
-        if let Err(error) = self
-            .known_peers
-            .remember(&conversation.nickname, &conversation.public_key)
-        {
-            conversation.system(format!("Could not save the key: {error}"));
-            return;
-        }
-
-        conversation.system(format!(
-            "New key for {} accepted. Only do this after comparing the fingerprint.",
-            conversation.nickname
-        ));
-
-        self.refresh_trust();
-    }
-
-    fn refresh_trust(&mut self) {
-        for conversation in &mut self.conversations {
-            conversation.trust = self
-                .known_peers
-                .check(&conversation.nickname, &conversation.public_key);
         }
     }
 
@@ -376,8 +304,6 @@ impl App {
                         conversation.unread += 1;
                         self.status = format!("New message from {}", conversation.nickname);
                     }
-
-                    self.remember_peer(index);
                 }
                 ReceivedText::NoSession(messages) => {
                     conversation.system(format!(
@@ -391,6 +317,48 @@ impl App {
                     conversation.nickname
                 )),
             },
+        }
+    }
+
+    // Wird regelmäßig aufgerufen: wiederholt unbeantwortete Handshakes
+    pub fn tick(&mut self) {
+        if !self.connected {
+            return;
+        }
+
+        for conversation in &mut self.conversations {
+            if !conversation.online || !conversation.session.is_pending() {
+                continue;
+            }
+
+            match conversation
+                .session
+                .check_timeout(&self.signing_key, &conversation.verifying_key)
+            {
+                Ok(HandshakeTimeout::Waiting) => {}
+                Ok(HandshakeTimeout::Retry(messages)) => {
+                    queue(&mut self.outgoing, &conversation.public_key, messages);
+                }
+                Ok(HandshakeTimeout::GaveUp(dropped)) => {
+                    conversation.system(format!(
+                        "Could not set up an encrypted session with {}",
+                        conversation.nickname
+                    ));
+
+                    if dropped > 0 {
+                        conversation.system(format!("{dropped} message(s) could not be delivered"));
+                    }
+                }
+                Err(error) => {
+                    let dropped = conversation.session.reset();
+
+                    conversation.system(format!("Key exchange failed: {error}"));
+
+                    if dropped > 0 {
+                        conversation.system(format!("{dropped} message(s) could not be delivered"));
+                    }
+                }
+            }
         }
     }
 
@@ -470,9 +438,7 @@ impl App {
                 continue;
             };
 
-            let trust = self.known_peers.check(&user.nickname, &user.public_key);
-
-            let mut conversation = Conversation {
+            self.conversations.push(Conversation {
                 nickname: user.nickname,
                 public_key: user.public_key,
                 verifying_key,
@@ -481,33 +447,7 @@ impl App {
                 lines: Vec::new(),
                 unread: 0,
                 session: Session::None,
-                trust,
-            };
-
-            match conversation.trust.clone() {
-                PeerTrust::KeyChanged => {
-                    conversation.system(format!(
-                        "WARNING: {} has a different key than when you last chatted. \
-                         Someone may be trying to intercept your messages.",
-                        conversation.nickname
-                    ));
-                    self.status = format!("Warning: the key of {} has changed", conversation.nickname);
-                }
-                PeerTrust::NicknameChanged { previous } => {
-                    conversation.system(format!(
-                        "WARNING: this key belonged to '{previous}' when you last chatted, \
-                         now it appears as '{}'.",
-                        conversation.nickname
-                    ));
-                    self.status = format!(
-                        "Warning: '{previous}' now appears as '{}'",
-                        conversation.nickname
-                    );
-                }
-                PeerTrust::New | PeerTrust::Known => {}
-            }
-
-            self.conversations.push(conversation);
+            });
         }
 
         // Offline ohne Verlauf braucht niemand in der Liste
@@ -530,6 +470,13 @@ impl App {
             .or(if self.conversations.is_empty() { None } else { Some(0) });
 
         self.list_state.select(index);
+    }
+}
+
+// Eine angefangene Eingabe soll nach dem Beenden nicht im Speicher zurückbleiben
+impl Drop for App {
+    fn drop(&mut self) {
+        self.input.zeroize();
     }
 }
 

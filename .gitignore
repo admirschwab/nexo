@@ -4,5 +4,4 @@ identity.nexo
 .DS_Store
 Thumbs.db
 identity.nexo.pending
-known_peers.nexo
-known_peers.nexo.tmp
+identity.nexo.upgrade

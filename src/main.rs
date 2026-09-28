@@ -3,29 +3,28 @@ mod config;
 mod functions;
 mod models;
 mod overlay;
+mod paths;
 
-use chat::known_peers::KnownPeers;
 use clap::{Parser, Subcommand};
-use config::{load_config, Config};
-use dialoguer::{Input, Password};
+use config::{load_config, warn_if_insecure, Config};
+use dialoguer::{Confirm, Input, Password};
 use functions::{
     connect::connect,
     create_identity::create_identity,
-    decrypt_private_key::decrypt_private_key,
+    decrypt_identity::decrypt_identity,
+    encrypt_identity::encrypt_identity,
     load_identity::load_identity,
     register_identity::register_identity,
     save_identity::save_identity,
+    unregister_identity::unregister_identity,
     validate_nickname::validate_nickname,
 };
+use models::{encrypted_identity::IdentityFormat, identity::Identity};
 use overlay::run_overlay;
-use std::{error::Error, fs, path::Path, process};
+use paths::Paths;
+use std::{error::Error, fs, process};
 use zeroize::Zeroizing;
 
-const IDENTITY_PATH: &str = "identity.nexo";
-// Zwischendatei während der Registrierung
-const PENDING_IDENTITY_PATH: &str = "identity.nexo.pending";
-// Verschlüsselte Liste der Schlüssel von Gesprächspartnern (siehe chat/known_peers.rs)
-const KNOWN_PEERS_PATH: &str = "known_peers.nexo";
 const PASSWORD_MIN_LENGTH: usize = 8;
 
 #[derive(Parser)]
@@ -42,8 +41,8 @@ enum Commands {
     Register,
     /// Log in with the identity stored on this computer
     Login,
-    /// Show the identity stored on this computer
-    Whoami,
+    /// Permanently delete your identity from the server and this computer
+    Unregister,
 }
 
 #[tokio::main]
@@ -57,21 +56,27 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
-    let config = load_config()
-        .map_err(|error| format!("Could not read config.toml: {error}"))?;
+    let paths = Paths::init()?;
+
+    paths
+        .migrate_from_current_dir()
+        .map_err(|error| format!("Could not move old files to {}: {error}", paths.dir.display()))?;
+
+    let config = load_config(&paths.config)
+        .map_err(|error| format!("Could not read {}: {error}", paths.config.display()))?;
+
+    warn_if_insecure(&config);
 
     match cli.command {
-        Commands::Register => register(&config).await,
-        Commands::Login => login(&config).await,
-        Commands::Whoami => whoami(),
+        Commands::Register => register(&config, &paths).await,
+        Commands::Login => login(&config, &paths).await,
+        Commands::Unregister => unregister(&config, &paths).await,
     }
 }
 
-async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
-    let identity_path = Path::new(IDENTITY_PATH);
-
+async fn register(config: &Config, paths: &Paths) -> Result<(), Box<dyn Error>> {
     // Pro Rechner gibt es genau eine Identität
-    if identity_path.exists() {
+    if paths.identity.exists() {
         return Err(
             "This computer is already registered. Use `nexo login` instead.".into(),
         );
@@ -79,11 +84,13 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
 
     // Übrig von einer abgebrochenen Registrierung. Ob sie beim Server angekommen ist,
     // lässt sich nicht sicher sagen, also nichts automatisch löschen.
-    if Path::new(PENDING_IDENTITY_PATH).exists() {
+    if paths.pending_identity.exists() {
         return Err(format!(
-            "An unfinished registration was found ({PENDING_IDENTITY_PATH}). \
-             If it was registered successfully, rename it to {IDENTITY_PATH}; \
-             otherwise delete it and run `nexo register` again."
+            "An unfinished registration was found ({}). \
+             If it was registered successfully, rename it to {}; \
+             otherwise delete it and run `nexo register` again.",
+            paths.pending_identity.display(),
+            paths::IDENTITY_FILE,
         )
             .into());
     }
@@ -114,25 +121,26 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
         })
         .interact()?);
 
-    let (identity, signing_key) = create_identity(nickname, &password)?;
+    let (identity, encrypted) = create_identity(nickname, &password)?;
 
     // Erst lokal in eine Zwischendatei speichern, dann registrieren, dann umbenennen.
     // So geht der Schlüssel nie verloren, wenn der Nickname schon registriert ist,
     // und wenn die Registrierung scheitert, bleibt keine Identitätsdatei zurück.
-    let pending_path = Path::new(PENDING_IDENTITY_PATH);
+    save_identity(&paths.pending_identity, &encrypted).map_err(|error| {
+        format!("Could not save {}: {error}", paths.pending_identity.display())
+    })?;
 
-    save_identity(pending_path, &identity)
-        .map_err(|error| format!("Could not save {PENDING_IDENTITY_PATH}: {error}"))?;
-
-    if let Err(error) = register_identity(config, &identity, &signing_key).await {
-        let _ = fs::remove_file(pending_path);
+    if let Err(error) = register_identity(config, &identity).await {
+        let _ = fs::remove_file(&paths.pending_identity);
         return Err(error);
     }
 
-    fs::rename(pending_path, identity_path).map_err(|error| {
+    fs::rename(&paths.pending_identity, &paths.identity).map_err(|error| {
         format!(
-            "Registered, but could not rename {PENDING_IDENTITY_PATH} to {IDENTITY_PATH}: {error}. \
-             Please rename it yourself, it contains your identity."
+            "Registered, but could not rename {} to {}: {error}. \
+             Please rename it yourself, it contains your identity.",
+            paths.pending_identity.display(),
+            paths::IDENTITY_FILE,
         )
     })?;
 
@@ -141,7 +149,7 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
     println!("Nickname:   {}", identity.nickname);
     println!(
         "Public key: {}",
-        hex::encode(signing_key.verifying_key().to_bytes())
+        hex::encode(identity.signing_key.verifying_key().to_bytes())
     );
     println!();
     println!("Use `nexo login` to log in.");
@@ -149,63 +157,114 @@ async fn register(config: &Config) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn login(config: &Config) -> Result<(), Box<dyn Error>> {
-    let identity_path = Path::new(IDENTITY_PATH);
-
-    if !identity_path.exists() {
-        return Err(
-            "No identity found on this computer. Use `nexo register` first.".into(),
-        );
-    }
-
-    let identity = load_identity(identity_path)?;
-
-    let password = Zeroizing::new(Password::new()
-        .with_prompt("Password")
-        .interact()?);
-
-    let signing_key = decrypt_private_key(
-        &identity.encrypted_private_key,
-        &password,
-    )
-        .map_err(|_| "Wrong password or corrupted identity file")?;
-
-    // Schlüssel der Gesprächspartner, die wir uns beim ersten Chat gemerkt haben
-    let known_peers = KnownPeers::load(Path::new(KNOWN_PEERS_PATH), &signing_key)?;
+async fn login(config: &Config, paths: &Paths) -> Result<(), Box<dyn Error>> {
+    let identity = unlock_identity(paths)?;
 
     println!("Connecting to {} ...", config.server);
 
-    let (connection, nickname) = connect(config, &signing_key).await?;
+    let (connection, nickname) = connect(config, &identity.signing_key).await?;
 
-    run_overlay(connection, nickname, signing_key, known_peers, config.server.clone()).await
+    run_overlay(
+        connection,
+        nickname,
+        identity.signing_key,
+        config.server.clone(),
+    )
+        .await
 }
 
-fn whoami() -> Result<(), Box<dyn Error>> {
-    let identity_path = Path::new(IDENTITY_PATH);
+async fn unregister(config: &Config, paths: &Paths) -> Result<(), Box<dyn Error>> {
+    let identity = unlock_identity(paths)?;
 
-    if !identity_path.exists() {
+    let confirmed = Confirm::new()
+        .with_prompt(format!(
+            "Permanently delete '{}' from the server and this computer? This cannot be undone.",
+            identity.nickname
+        ))
+        .default(false)
+        .interact()?;
+
+    if !confirmed {
+        println!("Nothing was deleted.");
+        return Ok(());
+    }
+
+    // Erst auf dem Server löschen: Scheitert das, bleibt die lokale Identität erhalten
+    unregister_identity(config, &identity.signing_key).await?;
+
+    fs::remove_file(&paths.identity).map_err(|error| {
+        format!(
+            "Deleted on the server, but could not delete {}: {error}",
+            paths.identity.display()
+        )
+    })?;
+
+    println!();
+    println!("Your identity '{}' has been deleted.", identity.nickname);
+    println!("The server no longer knows your public key or nickname.");
+
+    Ok(())
+}
+
+// Lädt identity.nexo und entschlüsselt sie mit dem Passwort.
+// Eine Datei im alten Format wird dabei ins neue umgewandelt.
+fn unlock_identity(paths: &Paths) -> Result<Identity, Box<dyn Error>> {
+    if !paths.identity.exists() {
         return Err(
             "No identity found on this computer. Use `nexo register` first.".into(),
         );
     }
 
-    let identity = load_identity(identity_path)?;
+    let encrypted = load_identity(&paths.identity)?;
 
     let password = Zeroizing::new(Password::new()
         .with_prompt("Password")
         .interact()?);
 
-    let signing_key = decrypt_private_key(
-        &identity.encrypted_private_key,
-        &password,
-    )
+    let identity = decrypt_identity(&encrypted, &password)
         .map_err(|_| "Wrong password or corrupted identity file")?;
 
-    println!("Nickname:   {}", identity.nickname);
-    println!(
-        "Public key: {}",
-        hex::encode(signing_key.verifying_key().to_bytes())
-    );
+    if matches!(encrypted.format, IdentityFormat::V1 { .. }) {
+        match upgrade_identity_file(paths, &identity, &password) {
+            Ok(()) => println!("Your identity file was upgraded to the new, more private format."),
+            Err(error) => eprintln!(
+                "Warning: could not upgrade {}: {error}",
+                paths.identity.display()
+            ),
+        }
+    }
+
+    Ok(identity)
+}
+
+// Schreibt die Identität im neuen Format (Nickname verschlüsselt, Argon2-Parameter
+// in der Datei) und ersetzt die alte Datei erst, wenn die neue vollständig ist
+fn upgrade_identity_file(
+    paths: &Paths,
+    identity: &Identity,
+    password: &str,
+) -> Result<(), Box<dyn Error>> {
+    let upgrade_path = paths.upgrade_identity.as_path();
+
+    // Rest eines abgebrochenen Versuchs. Die alte Datei ist dann noch vollständig.
+    if upgrade_path.exists() {
+        fs::remove_file(upgrade_path)?;
+    }
+
+    save_identity(upgrade_path, &encrypt_identity(identity, password)?)?;
+
+    // Neue Datei zur Kontrolle einmal lesen und entschlüsseln
+    let check = decrypt_identity(&load_identity(upgrade_path)?, password)?;
+
+    // Über den Public Key vergleichen, damit keine Kopien des privaten Schlüssels entstehen
+    if check.signing_key.verifying_key() != identity.signing_key.verifying_key()
+        || check.nickname != identity.nickname
+    {
+        let _ = fs::remove_file(upgrade_path);
+        return Err("Verification of the new file failed".into());
+    }
+
+    fs::rename(upgrade_path, &paths.identity)?;
 
     Ok(())
 }
