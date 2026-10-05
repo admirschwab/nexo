@@ -27,7 +27,17 @@ pub async fn connect(
         {
             "Too many connection attempts. Please wait a moment and try again.".to_string()
         }
-        _ => "Could not reach the Nexo server. Check the address with `nexo server`.".to_string(),
+        // Der Server (oder ein Reverse Proxy davor) hat geantwortet, aber den
+        // WebSocket nicht angenommen, z. B. weil /ws nicht weitergeleitet wird
+        tungstenite::Error::Http(response) => format!(
+            "The server answered with HTTP {} instead of opening the chat connection. \
+             If it runs behind a reverse proxy, check that WebSockets (/ws) are forwarded.",
+            response.status()
+        ),
+        // Die Fehlerursache mit ausgeben (ohne die Server-Adresse, siehe `nexo server`)
+        error => format!(
+            "Could not reach the Nexo server ({error}). Check the address with `nexo server`."
+        ),
     })?;
 
     let ServerMessage::Challenge { challenge } = next_message(&mut connection).await? else {

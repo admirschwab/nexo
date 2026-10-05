@@ -145,7 +145,7 @@ async fn register(paths: &Paths) -> Result<(), Box<dyn Error>> {
     // Bewusst ohne Nickname, Public Key oder Server: Alles, was hier ausgegeben
     // wird, bleibt im Verlauf des Terminals stehen
     println!();
-    println!("Registered successfully. Use `nexo login` to log in.");
+    println!("Registered successfully. Nexo is ready to serve. Use `nexo login` to log in.");
 
     Ok(())
 }
