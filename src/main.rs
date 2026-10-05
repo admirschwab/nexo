@@ -30,6 +30,7 @@ const PASSWORD_MIN_LENGTH: usize = 8;
 #[derive(Parser)]
 #[command(name = "nexo")]
 #[command(about = "A simple private CLI messenger")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

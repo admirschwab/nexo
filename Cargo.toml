@@ -3,6 +3,11 @@ name = "nexo-cli"
 version = "0.1.0"
 edition = "2024"
 
+# Das Programm heißt `nexo` (nicht nexo-cli)
+[[bin]]
+name = "nexo"
+path = "src/main.rs"
+
 [dependencies]
 argon2 = "0.6.0"
 chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }

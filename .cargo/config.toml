@@ -1,0 +1,4 @@
+# Unter Windows die C-Laufzeit fest in nexo.exe einbauen. Sonst braucht das Programm
+# vcruntime140.dll (Visual C++ Redistributable), die nicht auf jedem Rechner installiert ist.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,57 @@
+# Baut nexo.exe und veröffentlicht sie als GitHub Release, sobald ein Versions-Tag
+# gepusht wird:
+#
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# Der Tag muss zur Version in Cargo.toml passen. install.ps1 lädt immer das neueste Release.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag matches the version in Cargo.toml
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            Write-Error "Tag ${{ github.ref_name }} does not match version $version in Cargo.toml"
+            exit 1
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # .cargo/config.toml baut die C-Laufzeit fest ein (crt-static)
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Prepare release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/nexo.exe dist/nexo-windows-x86_64.exe
+          $hash = (Get-FileHash dist/nexo-windows-x86_64.exe -Algorithm SHA256).Hash.ToLower()
+          # Format wie sha256sum: "<hash>  <dateiname>"
+          Set-Content -Path dist/nexo-windows-x86_64.exe.sha256 -Value "$hash  nexo-windows-x86_64.exe" -NoNewline -Encoding ascii
+          Get-Content dist/nexo-windows-x86_64.exe.sha256
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/nexo-windows-x86_64.exe
+            dist/nexo-windows-x86_64.exe.sha256
+          generate_release_notes: true

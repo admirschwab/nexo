@@ -33,6 +33,49 @@ Nexo is designed to keep messaging **simple, private, and minimal**.
 * CLI-based interface
 * Written in Rust
 
+## Installation
+
+### Windows
+
+Open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/admirschwab/nexo/main/install.ps1 | iex
+```
+
+This downloads `nexo.exe` from the latest release, verifies its SHA-256 checksum, installs it to
+`%LOCALAPPDATA%\Programs\nexo` and adds it to your PATH. No administrator rights are needed.
+Afterwards, `nexo` works in any terminal. Run the same command again to update.
+
+Use [Windows Terminal](https://aka.ms/terminal) for Nexo: the old console window cannot show emojis.
+
+To uninstall:
+
+```powershell
+irm https://raw.githubusercontent.com/admirschwab/nexo/main/uninstall.ps1 | iex
+```
+
+Uninstalling keeps your identity (`%LOCALAPPDATA%\nexo`). To delete your account completely,
+run `nexo unregister` **before** uninstalling.
+
+### From source
+
+With [Rust](https://rustup.rs) installed (any platform):
+
+```sh
+cargo install --git https://github.com/admirschwab/nexo
+```
+
+### Releasing a new version
+
+Releases are built automatically by GitHub Actions when a version tag is pushed. The tag must match
+the version in `Cargo.toml`:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Commands
 
 * `nexo register` — create a new identity and register it on a server
