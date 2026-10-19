@@ -1,13 +1,17 @@
 use super::app::{App, Conversation, LineKind, MAX_INPUT_LENGTH};
+use crate::models::protocol::CLIENT_VERSION;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Padding, Paragraph},
     Frame,
 };
+
+// Ist weniger Platz für den Text, werden umbrochene Zeilen nicht eingerückt
+const MIN_TEXT_WIDTH: usize = 10;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let [header_area, main_area, footer_area] = Layout::vertical([
@@ -57,7 +61,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             connection,
         ]),
     ])
-        .block(Block::bordered().title(" Nexo ".bold()));
+        .block(Block::bordered().title(format!(" Nexo {CLIENT_VERSION} ").bold()));
 
     frame.render_widget(header, area);
 }
@@ -147,42 +151,12 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
     frame.render_widget(info, info_area);
 
     // Verlauf, immer bis ganz unten gescrollt
-    let lines: Vec<Line> = conversation
-        .lines
-        .iter()
-        .map(|line| {
-            let time = format!("{} ", line.time).dark_gray();
-
-            match line.kind {
-                // Text nur ausleihen statt bei jedem Neuzeichnen zu kopieren,
-                // damit keine Kopien der Nachrichten im Speicher zurückbleiben
-                LineKind::Own => Line::from(vec![
-                    time,
-                    "you: ".cyan().bold(),
-                    line.text.as_str().into(),
-                ]),
-                LineKind::Peer => Line::from(vec![
-                    time,
-                    format!("{}: ", conversation.nickname).magenta().bold(),
-                    line.text.as_str().into(),
-                ]),
-                LineKind::System => Line::from(vec![
-                    time,
-                    format!("— {}", line.text).dark_gray().italic(),
-                ]),
-            }
-        })
-        .collect();
-
     let inner = messages_area.inner(Margin::new(1, 1));
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-
-    let scroll = paragraph
-        .line_count(inner.width)
-        .saturating_sub(inner.height as usize);
+    let lines = history_lines(conversation, inner.width as usize);
+    let scroll = lines.len().saturating_sub(inner.height as usize);
 
     frame.render_widget(
-        paragraph
+        Paragraph::new(lines)
             .block(Block::bordered())
             .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
         messages_area,
@@ -199,8 +173,9 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
 
     // Bei langen Eingaben nur das Ende anzeigen (ausgeliehen, nicht kopiert).
     // Gerechnet wird mit der Breite auf dem Bildschirm: Emojis und viele
-    // asiatische Schriftzeichen belegen zwei Spalten. Eine Spalte bleibt für den Cursor frei.
-    let available = input_area.width.saturating_sub(3) as usize;
+    // asiatische Schriftzeichen belegen zwei Spalten. Abzüglich Rahmen und Einrückung
+    // bleibt eine Spalte für den Cursor frei.
+    let available = input_area.width.saturating_sub(4) as usize;
     let mut visible_start = app.input.len();
     let mut visible_width = 0;
 
@@ -216,7 +191,8 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
     }
 
     let visible = &app.input[visible_start..];
-    let cursor_x = input_area.x + 1 + visible_width as u16;
+    // Rahmen + eine Spalte Einrückung: Der Text beginnt unter dem "M" von " Message "
+    let cursor_x = input_area.x + 2 + visible_width as u16;
 
     // Zeichenzähler rechts oben, gelb ab 900, rot am Limit
     let counter = format!(" {input_length}/{MAX_INPUT_LENGTH} ");
@@ -230,12 +206,96 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
     };
 
     let input_block = Block::bordered()
+        .padding(Padding::left(1))
         .title(input_title)
         .title_top(Line::from(counter).right_aligned());
 
     frame.render_widget(Paragraph::new(visible).block(input_block), input_area);
 
     frame.set_cursor_position((cursor_x, input_area.y + 1));
+}
+
+// Zeilen des Verlaufs, selbst umbrochen: Folgezeilen beginnen unter dem Anfang
+// des Textes, nicht unter der Uhrzeit. Der Text wird nur ausgeliehen, damit keine
+// Kopien der Nachrichten im Speicher zurückbleiben.
+fn history_lines<'a>(conversation: &'a Conversation, width: usize) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+
+    for line in &conversation.lines {
+        let time = format!("{} ", line.time).dark_gray();
+
+        let (label, style) = match line.kind {
+            LineKind::Own => ("you: ".cyan().bold(), Style::new()),
+            LineKind::Peer => (
+                format!("{}: ", conversation.nickname).magenta().bold(),
+                Style::new(),
+            ),
+            LineKind::System => ("— ".dark_gray().italic(), Style::new().dark_gray().italic()),
+        };
+
+        let prefix_width = time.width() + label.width();
+
+        let indent = if width >= prefix_width + MIN_TEXT_WIDTH {
+            prefix_width
+        } else {
+            0
+        };
+
+        let mut parts = wrap(&line.text, width.saturating_sub(prefix_width), width - indent).into_iter();
+
+        let first = parts.next().unwrap_or_default();
+        lines.push(Line::from(vec![time, label, Span::styled(first, style)]));
+
+        for part in parts {
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(indent)),
+                Span::styled(part, style),
+            ]));
+        }
+    }
+
+    lines
+}
+
+// Bricht den Text an Leerzeichen um. Die erste Zeile hat `first_width` Spalten,
+// alle weiteren `rest_width`. Wörter, die länger als eine Zeile sind, werden
+// zwischen zwei Zeichen getrennt (nie mitten in einem Emoji).
+fn wrap(text: &str, first_width: usize, rest_width: usize) -> Vec<&str> {
+    let mut lines = Vec::new();
+    // Beginn und Breite der aktuellen Zeile
+    let mut start = 0;
+    let mut width = 0;
+    let mut limit = first_width.max(1);
+    let mut offset = 0;
+
+    for word in text.split_inclusive(' ') {
+        // Leerzeichen am Ende dürfen über den Rand hinausgehen
+        if width > 0 && width + word.trim_end().width() > limit {
+            lines.push(text[start..offset].trim_end());
+            start = offset;
+            width = 0;
+            limit = rest_width.max(1);
+        }
+
+        for (index, grapheme) in word.grapheme_indices(true) {
+            let grapheme_width = grapheme.width();
+
+            if width > 0 && width + grapheme_width > limit && grapheme != " " {
+                lines.push(&text[start..offset + index]);
+                start = offset + index;
+                width = 0;
+                limit = rest_width.max(1);
+            }
+
+            width += grapheme_width;
+        }
+
+        offset += word.len();
+    }
+
+    lines.push(text[start..].trim_end());
+
+    lines
 }
 
 // Kurzform des Public Keys für die Liste, z. B. "3f9a1c2e…b21e"
