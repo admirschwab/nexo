@@ -171,15 +171,17 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
 
     let input_length = app.input.chars().count();
 
-    // Bei langen Eingaben nur das Ende anzeigen (ausgeliehen, nicht kopiert).
-    // Gerechnet wird mit der Breite auf dem Bildschirm: Emojis und viele
+    // Bei langen Eingaben nur einen Ausschnitt um den Cursor anzeigen (ausgeliehen,
+    // nicht kopiert). Gerechnet wird mit der Breite auf dem Bildschirm: Emojis und viele
     // asiatische Schriftzeichen belegen zwei Spalten. Abzüglich Rahmen und Einrückung
     // bleibt eine Spalte für den Cursor frei.
     let available = input_area.width.saturating_sub(4) as usize;
-    let mut visible_start = app.input.len();
+    let start = input_start(app, available);
+
+    let mut end = start;
     let mut visible_width = 0;
 
-    for (start, grapheme) in app.input.grapheme_indices(true).rev() {
+    for (index, grapheme) in app.input[start..].grapheme_indices(true) {
         let grapheme_width = grapheme.width();
 
         if visible_width + grapheme_width > available {
@@ -187,12 +189,13 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
         }
 
         visible_width += grapheme_width;
-        visible_start = start;
+        end = start + index + grapheme.len();
     }
 
-    let visible = &app.input[visible_start..];
+    let visible = &app.input[start..end];
+
     // Rahmen + eine Spalte Einrückung: Der Text beginnt unter dem "M" von " Message "
-    let cursor_x = input_area.x + 2 + visible_width as u16;
+    let cursor_x = input_area.x + 2 + columns(&app.input[start..app.cursor]) as u16;
 
     // Zeichenzähler rechts oben, gelb ab 900, rot am Limit
     let counter = format!(" {input_length}/{MAX_INPUT_LENGTH} ");
@@ -296,6 +299,36 @@ fn wrap(text: &str, first_width: usize, rest_width: usize) -> Vec<&str> {
     lines.push(text[start..].trim_end());
 
     lines
+}
+
+// Ab welchem Byte die Eingabe angezeigt wird, damit der Cursor im Feld bleibt.
+// Der Ausschnitt verschiebt sich nur, wenn der Cursor an den Rand stößt.
+fn input_start(app: &App, available: usize) -> usize {
+    let input = app.input.as_str();
+    let mut start = app.input_scroll.get().min(app.cursor);
+
+    // Cursor rechts aus dem Feld: Ausschnitt nach rechts schieben
+    while columns(&input[start..app.cursor]) > available {
+        start += input[start..].graphemes(true).next().map_or(0, str::len);
+    }
+
+    // Hinten wurde gelöscht und es ist wieder Platz: Ausschnitt nach links ziehen
+    while let Some((previous, _)) = input[..start].grapheme_indices(true).next_back() {
+        if columns(&input[previous..]) > available {
+            break;
+        }
+
+        start = previous;
+    }
+
+    app.input_scroll.set(start);
+
+    start
+}
+
+// Breite auf dem Bildschirm, Zeichen für Zeichen gezählt (wie beim Anzeigen)
+fn columns(text: &str) -> usize {
+    text.graphemes(true).map(|grapheme| grapheme.width()).sum()
 }
 
 // Kurzform des Public Keys für die Liste, z. B. "3f9a1c2e…b21e"

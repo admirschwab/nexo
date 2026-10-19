@@ -11,6 +11,7 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     widgets::ListState,
 };
+use std::cell::Cell;
 use unicode_segmentation::UnicodeSegmentation;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -85,6 +86,11 @@ pub struct App {
     pub list_state: ListState,
     pub view: View,
     pub input: String,
+    // Position des Cursors in `input` (Byte-Index, immer an einer Zeichengrenze)
+    pub cursor: usize,
+    // Erstes sichtbares Byte der Eingabe, wenn sie länger als das Feld ist.
+    // Wird beim Zeichnen angepasst, damit der Cursor sichtbar bleibt.
+    pub input_scroll: Cell<usize>,
     pub status: String,
     pub should_quit: bool,
     // Nachrichten, die an den Server gehen sollen (die Ereignisschleife verschickt sie)
@@ -106,6 +112,8 @@ impl App {
             // So wird der Puffer beim Tippen nie umkopiert und es bleiben
             // keine alten Kopien der Eingabe im Speicher liegen.
             input: String::with_capacity(MAX_INPUT_LENGTH * 4),
+            cursor: 0,
+            input_scroll: Cell::new(0),
             status: String::new(),
             should_quit: false,
             outgoing: Vec::new(),
@@ -160,27 +168,94 @@ impl App {
     }
 
     fn handle_chat_key(&mut self, key: KeyEvent) {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Der Puffer hat Platz für die längste Eingabe: Einfügen und Löschen
+        // verschieben nur innerhalb des Puffers, es entstehen keine Kopien
         match key.code {
             KeyCode::Esc => {
                 self.view = View::List;
                 self.status.clear();
             }
             KeyCode::Enter => self.send_input(),
+            KeyCode::Left if control => self.cursor = self.previous_word(),
+            KeyCode::Right if control => self.cursor = self.next_word(),
+            KeyCode::Left => self.cursor = self.previous_boundary(),
+            KeyCode::Right => self.cursor = self.next_boundary(),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.input.len(),
             // Löscht ein ganzes sichtbares Zeichen. Viele Emojis bestehen aus mehreren
             // Teilen (z. B. 👍🏽 oder 👨‍👩‍👧), die sonst einzeln gelöscht würden.
             KeyCode::Backspace => {
-                if let Some((start, _)) = self.input.grapheme_indices(true).next_back() {
-                    self.input.truncate(start);
-                }
+                let start = self.previous_boundary();
+                self.input.replace_range(start..self.cursor, "");
+                self.cursor = start;
+            }
+            KeyCode::Delete => {
+                let end = self.next_boundary();
+                self.input.replace_range(self.cursor..end, "");
             }
             // AltGr-Zeichen (z. B. @ auf deutscher Tastatur) kommen als Strg+Alt an
             KeyCode::Char(c) if key.modifiers != KeyModifiers::CONTROL => {
                 if self.input.chars().count() < MAX_INPUT_LENGTH {
-                    self.input.push(c);
+                    self.input.insert(self.cursor, c);
+                    self.cursor += c.len_utf8();
                 }
             }
             _ => {}
         }
+    }
+
+    // Anfang des sichtbaren Zeichens vor dem Cursor
+    fn previous_boundary(&self) -> usize {
+        self.input[..self.cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map_or(0, |(index, _)| index)
+    }
+
+    // Ende des sichtbaren Zeichens nach dem Cursor
+    fn next_boundary(&self) -> usize {
+        self.input[self.cursor..]
+            .graphemes(true)
+            .next()
+            .map_or(self.cursor, |grapheme| self.cursor + grapheme.len())
+    }
+
+    // Strg+←: an den Anfang des aktuellen oder vorigen Worts
+    fn previous_word(&self) -> usize {
+        let mut position = self.cursor;
+        let mut in_word = false;
+
+        for (index, grapheme) in self.input[..self.cursor].grapheme_indices(true).rev() {
+            let space = is_space(grapheme);
+
+            if space && in_word {
+                break;
+            }
+
+            in_word |= !space;
+            position = index;
+        }
+
+        position
+    }
+
+    // Strg+→: an den Anfang des nächsten Worts (oder ans Ende)
+    fn next_word(&self) -> usize {
+        let mut after_space = false;
+
+        for (index, grapheme) in self.input[self.cursor..].grapheme_indices(true) {
+            let space = is_space(grapheme);
+
+            if !space && after_space {
+                return self.cursor + index;
+            }
+
+            after_space |= space;
+        }
+
+        self.input.len()
     }
 
     fn send_input(&mut self) {
@@ -210,6 +285,7 @@ impl App {
 
         // Überschreibt die Eingabe mit Nullen, der Puffer bleibt erhalten
         self.input.zeroize();
+        self.cursor = 0;
 
         match conversation.session.send_text(
             &self.signing_key,
@@ -496,6 +572,10 @@ impl Drop for App {
     fn drop(&mut self) {
         self.input.zeroize();
     }
+}
+
+fn is_space(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
 }
 
 fn queue(outgoing: &mut Vec<ClientMessage>, to: &str, messages: Vec<PeerMessage>) {
