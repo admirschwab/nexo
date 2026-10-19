@@ -62,10 +62,10 @@ function Install-Nexo {
 
     $version = & $target --version
 
-    Write-Host ''
     Write-Host "Installed $version to $installDir"
+    Write-Host ''
     Write-Host 'Run "nexo register" to create an identity, or "nexo login" if you already have one.'
-    Write-Host 'Tip: use Windows Terminal, the old console window cannot show emojis.'
+    Write-Host ''
 }
 
 function Add-NexoToPath([string] $directory) {
