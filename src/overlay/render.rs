@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let hint = match app.open_conversation() {
         Some(conversation) => {
             render_chat(frame, app, conversation, main_area);
-            "Enter send · Esc back to list · Ctrl+C quit"
+            "Enter send · ↑/↓ PgUp/PgDn scroll · Ctrl+End newest · Esc back · Ctrl+C quit"
         }
         None => {
             render_list(frame, app, main_area);
@@ -150,14 +150,34 @@ fn render_chat(frame: &mut Frame, app: &App, conversation: &Conversation, area: 
 
     frame.render_widget(info, info_area);
 
-    // Verlauf, immer bis ganz unten gescrollt
+    // Verlauf: ganz unten, außer der Nutzer hat hochgescrollt
     let inner = messages_area.inner(Margin::new(1, 1));
     let lines = history_lines(conversation, inner.width as usize);
-    let scroll = lines.len().saturating_sub(inner.height as usize);
+    let height = inner.height as usize;
+    let max_scroll = lines.len().saturating_sub(height);
+
+    // Für die Tasten merken, wie weit gescrollt werden kann
+    app.chat_lines.set(lines.len());
+    app.chat_height.set(height);
+
+    // Ist das Fenster größer geworden, nicht über das Ende hinaus scrollen
+    let scroll = app.chat_scroll.map_or(max_scroll, |top| top.min(max_scroll));
+
+    let mut block = Block::bordered();
+
+    if app.chat_scroll.is_some() {
+        let hint = if app.unseen > 0 {
+            format!(" ↓ {} new message(s) · Ctrl+End ", app.unseen).yellow().bold()
+        } else {
+            " ↑ older messages · Ctrl+End back to newest ".dark_gray()
+        };
+
+        block = block.title_bottom(Line::from(hint).right_aligned());
+    }
 
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered())
+            .block(block)
             .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
         messages_area,
     );

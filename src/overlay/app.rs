@@ -91,6 +91,15 @@ pub struct App {
     // Erstes sichtbares Byte der Eingabe, wenn sie länger als das Feld ist.
     // Wird beim Zeichnen angepasst, damit der Cursor sichtbar bleibt.
     pub input_scroll: Cell<usize>,
+    // Oberste sichtbare Zeile des Verlaufs im offenen Chat.
+    // None: ganz unten, neue Nachrichten rutschen automatisch nach.
+    pub chat_scroll: Option<usize>,
+    // Neue Nachrichten, seit hochgescrollt wurde (für den Hinweis unten im Verlauf)
+    pub unseen: usize,
+    // Zeilen des Verlaufs und Höhe des Felds beim letzten Zeichnen.
+    // Daraus ergibt sich, wie weit gescrollt werden kann.
+    pub chat_lines: Cell<usize>,
+    pub chat_height: Cell<usize>,
     pub status: String,
     pub should_quit: bool,
     // Nachrichten, die an den Server gehen sollen (die Ereignisschleife verschickt sie)
@@ -114,6 +123,10 @@ impl App {
             input: String::with_capacity(MAX_INPUT_LENGTH * 4),
             cursor: 0,
             input_scroll: Cell::new(0),
+            chat_scroll: None,
+            unseen: 0,
+            chat_lines: Cell::new(0),
+            chat_height: Cell::new(0),
             status: String::new(),
             should_quit: false,
             outgoing: Vec::new(),
@@ -161,6 +174,9 @@ impl App {
                     conversation.unread = 0;
                     self.view = View::Chat(conversation.public_key.clone());
                     self.status.clear();
+                    // Ein Chat öffnet immer bei den neuesten Nachrichten
+                    self.chat_scroll = None;
+                    self.unseen = 0;
                 }
             }
             _ => {}
@@ -178,6 +194,11 @@ impl App {
                 self.status.clear();
             }
             KeyCode::Enter => self.send_input(),
+            KeyCode::Up => self.scroll_up(1),
+            KeyCode::Down => self.scroll_down(1),
+            KeyCode::PageUp => self.scroll_up(self.page()),
+            KeyCode::PageDown => self.scroll_down(self.page()),
+            KeyCode::End if control => self.scroll_to_bottom(),
             KeyCode::Left if control => self.cursor = self.previous_word(),
             KeyCode::Right if control => self.cursor = self.next_word(),
             KeyCode::Left => self.cursor = self.previous_boundary(),
@@ -204,6 +225,45 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    // Eine Seite weit scrollen, eine Zeile bleibt zur Orientierung stehen
+    fn page(&self) -> usize {
+        self.chat_height.get().saturating_sub(1).max(1)
+    }
+
+    // Weiteste Position: die letzte Zeile steht ganz unten
+    fn max_scroll(&self) -> usize {
+        self.chat_lines.get().saturating_sub(self.chat_height.get())
+    }
+
+    fn scroll_up(&mut self, lines: usize) {
+        let max = self.max_scroll();
+
+        // Alles passt ins Feld, es gibt nichts zu scrollen
+        if max == 0 {
+            return;
+        }
+
+        let top = self.chat_scroll.unwrap_or(max).min(max);
+        self.chat_scroll = Some(top.saturating_sub(lines));
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        let Some(top) = self.chat_scroll else {
+            return;
+        };
+
+        if top + lines >= self.max_scroll() {
+            self.scroll_to_bottom();
+        } else {
+            self.chat_scroll = Some(top + lines);
+        }
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.chat_scroll = None;
+        self.unseen = 0;
     }
 
     // Anfang des sichtbaren Zeichens vor dem Cursor
@@ -294,6 +354,9 @@ impl App {
         ) {
             Ok(messages) => {
                 conversation.push(LineKind::Own, text.to_string());
+                // Nach dem Senden die eigene Nachricht zeigen
+                self.chat_scroll = None;
+                self.unseen = 0;
                 queue(&mut self.outgoing, &conversation.public_key, messages);
             }
             Err(error) => conversation.system(format!("Could not send message: {error}")),
@@ -390,6 +453,11 @@ impl App {
                     }
 
                     conversation.push(LineKind::Peer, text);
+
+                    // Hochgescrollt: Der Ausschnitt bleibt stehen, unten erscheint ein Hinweis
+                    if viewing && self.chat_scroll.is_some() {
+                        self.unseen += 1;
+                    }
 
                     if !viewing {
                         conversation.unread += 1;
