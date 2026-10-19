@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::models::protocol::{ClientMessage, ServerMessage, AUTH_CONTEXT};
+use crate::models::protocol::{ClientMessage, ServerMessage, AUTH_CONTEXT, CLIENT_VERSION};
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use std::error::Error;
@@ -52,6 +52,7 @@ pub async fn connect(
     let auth = ClientMessage::Auth {
         public_key: hex::encode(signing_key.verifying_key().to_bytes()),
         signature: hex::encode(signature.to_bytes()),
+        version: CLIENT_VERSION,
     };
 
     connection
@@ -60,6 +61,7 @@ pub async fn connect(
 
     match next_message(&mut connection).await? {
         ServerMessage::AuthOk { nickname } => Ok((connection, nickname)),
+        // Auch wenn unsere Version zu alt ist: Der Grund enthält dann die Anleitung zum Update
         ServerMessage::AuthError { reason } => Err(reason.into()),
         _ => Err("Unexpected message from server".into()),
     }

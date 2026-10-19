@@ -29,10 +29,18 @@ pub enum ServerMessage {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    Auth { public_key: String, signature: String },
+    // "version": Ist sie dem Server zu alt, lehnt er die Anmeldung mit AuthError ab
+    Auth {
+        public_key: String,
+        signature: String,
+        version: &'static str,
+    },
     // "payload" ist eine PeerMessage als JSON, der Server kann sie nicht lesen
     Send { to: String, payload: String },
 }
+
+// Unsere Version, wird bei Anmeldung und Registrierung mitgeschickt
+pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Wird vor die Challenge gesetzt und mitsigniert, damit eine Login-Signatur
 // nie mit einer anderen Signatur des Clients verwechselt werden kann
