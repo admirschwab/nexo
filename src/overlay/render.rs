@@ -36,7 +36,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Fußzeile: Status und Tastenbelegung
     let footer = Paragraph::new(vec![
-        Line::from(app.status.clone().yellow()),
+        if app.connected {
+            Line::from(app.status.clone().yellow())
+        } else {
+            Line::from(app.disconnect_reason.clone().red())
+        },
         Line::from(hint.dark_gray()),
     ]);
 

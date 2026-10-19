@@ -101,6 +101,9 @@ pub struct App {
     pub chat_lines: Cell<usize>,
     pub chat_height: Cell<usize>,
     pub status: String,
+    // Warum und wann die Verbindung abgerissen ist. Bleibt stehen, auch wenn
+    // `status` beim Wechseln der Ansicht geleert wird.
+    pub disconnect_reason: String,
     pub should_quit: bool,
     // Nachrichten, die an den Server gehen sollen (die Ereignisschleife verschickt sie)
     pub outgoing: Vec<ClientMessage>,
@@ -128,6 +131,7 @@ impl App {
             chat_lines: Cell::new(0),
             chat_height: Cell::new(0),
             status: String::new(),
+            disconnect_reason: String::new(),
             should_quit: false,
             outgoing: Vec::new(),
         }
@@ -521,10 +525,15 @@ impl App {
         }
     }
 
-    pub fn disconnected(&mut self) {
+    // `reason` erklärt, wie die Verbindung geendet hat. Mit der Uhrzeit lässt sich
+    // ein Abriss z. B. einem Neustart des Servers oder der eigenen Leitung zuordnen.
+    pub fn disconnected(&mut self, reason: &str) {
         self.connected = false;
         self.set_online_users(Vec::new());
-        self.status = "Connection to server lost. Press q to quit.".to_string();
+        self.disconnect_reason = format!(
+            "Connection to server lost at {}: {reason}. Press q to quit.",
+            chrono::Local::now().format("%H:%M:%S")
+        );
     }
 
     fn find(&self, public_key: &str) -> Option<usize> {

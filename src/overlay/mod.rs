@@ -65,14 +65,20 @@ pub async fn run_overlay(
                             app.handle_server_message(message);
                         }
                     }
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => app.disconnected(),
+                    // Sauber geschlossen, z. B. bei einem Neustart des Servers
+                    Some(Ok(Message::Close(_))) => {
+                        app.disconnected("the server closed the connection");
+                    }
+                    Some(Err(error)) => app.disconnected(&format!("network error ({error})")),
+                    // Ohne Close-Nachricht beendet, z. B. von einem Proxy dazwischen
+                    None => app.disconnected("the connection was closed without notice"),
                     // Pings beantwortet tungstenite selbst
                     Some(Ok(_)) => {}
                 }
             },
 
             _ = sleep_until(last_seen + SERVER_TIMEOUT), if app.connected => {
-                app.disconnected();
+                app.disconnected("no response from the server for 60 seconds");
             },
 
             _ = ticker.tick() => app.tick(),
@@ -88,8 +94,8 @@ pub async fn run_overlay(
                 continue;
             };
 
-            if ws_sender.send(Message::text(text)).await.is_err() {
-                app.disconnected();
+            if let Err(error) = ws_sender.send(Message::text(text)).await {
+                app.disconnected(&format!("could not send ({error})"));
             }
         }
 
